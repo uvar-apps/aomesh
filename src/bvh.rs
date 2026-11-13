@@ -234,29 +234,18 @@ impl Bvh {
         if geo.triangles.is_empty() {
             return Self::default();
         }
-        let mut builder = Builder {
-            nodes: Vec::with_capacity(geo.triangles.len() / LEAF_SIZE * 2 + 8),
-            order: (0..geo.triangles.len() as u32).collect(),
-            bounds: Vec::with_capacity(geo.triangles.len()),
-            centroids: Vec::with_capacity(geo.triangles.len()),
-            bins: vec![0; geo.triangles.len()],
+        let measured = measure(geo);
+        let mut order: Vec<u32> = (0..geo.triangles.len() as u32).collect();
+        let plan = Plan {
+            measured: &measured,
         };
-        for triangle in &geo.triangles {
-            let box_ = Aabb::from_triangle(geo, *triangle);
-            // Indexed by original triangle index, and it stays that way: the
-            // hierarchy permutes `order`, never these tables.
-            builder.bounds.push(box_);
-            builder.centroids.push(box_.centroid());
-        }
-        let root_box = builder.merge(0..builder.order.len());
-        let root = builder.split(0..builder.order.len(), 0, root_box);
-        let bounds = builder.nodes[root as usize].bounds;
-        let slots = builder.reorder(geo);
-        let nodes = pack_siblings(builder.nodes, root as usize);
+        let root_box = merge(&order, &plan);
+        let nodes = build(&mut order, 0, 0, root_box, &plan);
+        let slots = reorder(geo, &order);
         Bvh {
-            nodes,
+            nodes: pack_siblings(nodes, 0),
             slots,
-            bounds,
+            bounds: root_box,
         }
     }
 
@@ -444,252 +433,328 @@ fn pack_siblings(nodes: Vec<Node>, root: usize) -> Vec<Node> {
     packed
 }
 
-/// Build state; exists so the scratch tables do not outlive the build.
-struct Builder {
-    nodes: Vec<Node>,
-    order: Vec<u32>,
-    bounds: Vec<Aabb>,
-    centroids: Vec<[f64; 3]>,
-    /// Bin index of each triangle, written by [`Builder::bin`] and read by the
-    /// partition that follows it; a stale label is never read, because every node
-    /// labels its own triangles before moving them.
-    bins: Vec<u8>,
+/// What the build knows about one triangle: its own box, and the point that partitions it.
+#[derive(Clone, Copy)]
+struct Measure {
+    bounds: Aabb,
+    centroid: [f64; 3],
 }
 
-impl Builder {
-    /// Copy the triangles into hierarchy order as [`Slot`] records.
-    ///
-    /// Done once, after the tree is finished: the partition moves indices, which
-    /// is cheap, and this pass turns them into bytes, which is not — so the
-    /// records are written exactly once in the order the traversal will read them.
-    fn reorder(&self, geo: &Geometry) -> Vec<Slot> {
-        self.order
-            .iter()
-            .map(|&index| {
-                let [a, b, c] = geo.triangles[index as usize];
-                let p0 = geo.positions[a as usize];
-                let e1 = sub(geo.positions[b as usize], p0);
-                let e2 = sub(geo.positions[c as usize], p0);
-                Slot {
-                    p0,
-                    e1,
-                    e2,
-                    edge_scale: dot(e1, e1) * dot(e2, e2),
-                    verts: [a, b, c],
-                }
-            })
-            .collect()
+/// Read-only inputs every subtree shares.
+struct Plan<'a> {
+    measured: &'a [Measure],
+}
+
+/// One box and centroid per triangle, in file order.
+///
+/// Partitioning and traversal both need these, and a triangle's measure does not depend on
+/// any other triangle's, so the pass runs across the pool before the tree recursion starts.
+fn measure(geo: &Geometry) -> Vec<Measure> {
+    use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
+    geo.triangles
+        .par_iter()
+        .map(|&triangle| {
+            let bounds = Aabb::from_triangle(geo, triangle);
+            Measure {
+                bounds,
+                centroid: bounds.centroid(),
+            }
+        })
+        .collect()
+}
+
+/// Triangles below which a subtree is finished on whichever thread reached it.
+///
+/// Handing work to the pool is not free, and a partition of a few thousand triangles takes
+/// about as long as the handover, so the tree splits across threads only while the pieces
+/// are big enough to pay for it. The result is the same tree either way — see
+/// [`the_parallel_build_and_the_serial_one_agree`].
+const PARALLEL_GRAIN: usize = 4096;
+
+/// Build the subtree over `order`, whose first triangle sits at absolute position `base`.
+///
+/// A range at least [`PARALLEL_GRAIN`] wide is divided here and its halves handed to
+/// [`rayon::join`], each owning its own node vector; anything smaller is finished by
+/// [`fill`] in a single one. The split is deliberate. Owning a subtree is what lets a thread
+/// build one with nothing to lock — but a join also copies its children's nodes to splice
+/// them in, and below a few thousand triangles the copying costs more than the work it
+/// parallelises.
+///
+/// Each returned vector holds its subtree with the root at index `0` and child links
+/// relative to that vector, so a subtree can be spliced anywhere by shifting its links.
+fn build(order: &mut [u32], base: usize, depth: usize, box_: Aabb, plan: &Plan<'_>) -> Vec<Node> {
+    let mut nodes = Vec::new();
+    if order.len() < PARALLEL_GRAIN {
+        fill(order, base, depth, box_, plan, &mut nodes);
+        return nodes;
     }
 
-    /// Partition `range` of [`Builder::order`] and return the node index.
-    ///
-    /// `box_` is the union of the range's triangles, handed down from the parent's bin
-    /// aggregates rather than recomputed here. Children are pushed after the parent, so
-    /// a node's own entry is finished once both subtrees exist.
-    fn split(&mut self, range: std::ops::Range<usize>, depth: usize, box_: Aabb) -> u32 {
-        let index = self.nodes.len() as u32;
-        self.nodes.push(Node {
-            bounds: box_,
-            children: [0; 2],
-            start: 0,
-            count: 0,
-        });
+    let Some((pivot, left_box, right_box)) = divide(order, &box_, plan) else {
+        fill(order, base, depth, box_, plan, &mut nodes);
+        return nodes;
+    };
+    // `divide` already moved the triangles, so the boxes it returns describe the two sides
+    // as the traversal will find them.
+    let (left_slice, right_slice) = order.split_at_mut(pivot);
 
-        if range.len() <= LEAF_SIZE || depth >= MAX_DEPTH {
-            self.make_leaf(index, range);
-            return index;
+    let (left_nodes, right_nodes) = rayon::join(
+        || build(left_slice, base, depth + 1, left_box, plan),
+        || build(right_slice, base + pivot, depth + 1, right_box, plan),
+    );
+
+    nodes.reserve(1 + left_nodes.len() + right_nodes.len());
+    let right_link = 1 + left_nodes.len() as u32;
+    nodes.push(Node {
+        bounds: box_,
+        children: [1, right_link],
+        start: 0,
+        count: 0,
+    });
+    nodes.extend(left_nodes.into_iter().map(|node| shift(node, 1)));
+    nodes.extend(right_nodes.into_iter().map(|node| shift(node, right_link)));
+    nodes
+}
+
+/// A node with its child links moved by `delta`. A leaf's numbers are a span of triangles,
+/// not links, so they stay put.
+fn shift(node: Node, delta: u32) -> Node {
+    if node.count > 0 {
+        node
+    } else {
+        Node {
+            children: [node.children[0] + delta, node.children[1] + delta],
+            ..node
         }
-
-        let axis = box_.longest_axis();
-        let Some((low, width)) = self.centroid_extent(&range, axis) else {
-            // Every centroid shares this coordinate, so no split on this axis can
-            // make progress; the node keeps its triangles.
-            self.make_leaf(index, range);
-            return index;
-        };
-
-        let partition = self.bin(range.clone(), axis, low, width, box_);
-        let Some((left_count, left, right)) = partition else {
-            self.make_leaf(index, range);
-            return index;
-        };
-
-        // Move the cheapest cut's triangles to the front by rank: `left_count` is the
-        // number of triangles in the bins at or below the cut, so ordering by bin index
-        // and stopping there puts exactly those in the left child.
-        let Builder { order, bins, .. } = self;
-        order[range.clone()]
-            .select_nth_unstable_by(left_count, |a, b| bins[*a as usize].cmp(&bins[*b as usize]));
-        let pivot = range.start + left_count;
-        debug_assert!(
-            left_count > 0 && left_count < range.len(),
-            "split makes progress"
-        );
-
-        let left_child = self.split(range.start..pivot, depth + 1, left);
-        let right_child = self.split(pivot..range.end, depth + 1, right);
-        // The children partition the same triangle set, so `box_` is already their union.
-        self.nodes[index as usize] = Node {
-            bounds: box_,
-            children: [left_child, right_child],
-            start: 0,
-            count: 0,
-        };
-        index
     }
+}
 
-    /// Bin `range` along `axis` and cost every interior cut.
-    ///
-    /// Returns how many triangles the best cut puts on the left, with the bounds of the
-    /// two sides, or `None` when no cut beats keeping the triangles in one leaf. One pass fills the bins, a second
-    /// sweeps the left side, a third the right; each bin carries the count and bounds of
-    /// the triangles that fell in it, which is all the heuristic reads.
-    fn bin(
-        &mut self,
-        range: std::ops::Range<usize>,
-        axis: usize,
-        low: f64,
-        width: f64,
-        parent: Aabb,
-    ) -> Option<(usize, Aabb, Aabb)> {
-        let mut counts = [0u32; BINS];
-        let mut minimum = [[f64::MAX; 3]; BINS];
-        let mut maximum = [[f64::MIN; 3]; BINS];
+/// Build a subtree into a shared `nodes` vector, depth-first.
+///
+/// A node is pushed before its children exist so it can note its own index, then patched
+/// once both subtrees have been appended: the left child always lands immediately after its
+/// parent, and the right after everything the left subtree occupies.
+fn fill(
+    order: &mut [u32],
+    base: usize,
+    depth: usize,
+    box_: Aabb,
+    plan: &Plan<'_>,
+    nodes: &mut Vec<Node>,
+) {
+    let index = nodes.len();
+    nodes.push(Node {
+        bounds: box_,
+        children: [0; 2],
+        start: 0,
+        count: 0,
+    });
 
-        for position in range.clone() {
-            let triangle = self.order[position] as usize;
-            let centroid = self.centroids[triangle][axis];
-            let bin = (((centroid - low) / width) as usize).min(BINS - 1);
-            // Labelled by triangle, not by position: the partition below compares the
-            // triangles it moves, and a triangle appears exactly once in `order`, so
-            // its label follows it wherever it is swapped to.
-            self.bins[triangle] = bin as u8;
-            counts[bin] += 1;
-            let source = &self.bounds[triangle];
-            for coordinate in 0..3 {
-                minimum[bin][coordinate] = minimum[bin][coordinate].min(source.min[coordinate]);
-                maximum[bin][coordinate] = maximum[bin][coordinate].max(source.max[coordinate]);
-            }
-        }
-
-        /// Surface area, the SA in SAH. A box's own area normalises the split cost, so
-        /// what is compared is the fraction of the parent's surface each child covers,
-        /// weighted by how many triangles it holds.
-        fn area(min: [f64; 3], max: [f64; 3]) -> f64 {
-            let span = [
-                (max[0] - min[0]).max(0.0),
-                (max[1] - min[1]).max(0.0),
-                (max[2] - min[2]).max(0.0),
-            ];
-            2.0 * (span[0] * span[1] + span[1] * span[2] + span[2] * span[0])
-        }
-
-        // Right-hand aggregates, so the sweep over cuts keeps only the left running.
-        let mut right_counts = [0u32; BINS + 1];
-        let mut right_min = [[f64::MAX; 3]; BINS + 1];
-        let mut right_max = [[f64::MIN; 3]; BINS + 1];
-        for bin in (0..BINS).rev() {
-            right_counts[bin] = right_counts[bin + 1] + counts[bin];
-            for coordinate in 0..3 {
-                right_min[bin][coordinate] =
-                    right_min[bin + 1][coordinate].min(if counts[bin] > 0 {
-                        minimum[bin][coordinate]
-                    } else {
-                        f64::MAX
-                    });
-                right_max[bin][coordinate] =
-                    right_max[bin + 1][coordinate].max(if counts[bin] > 0 {
-                        maximum[bin][coordinate]
-                    } else {
-                        f64::MIN
-                    });
-            }
-        }
-
-        let mut left_counts = 0u32;
-        let mut left_min = [f64::MAX; 3];
-        let mut left_max = [f64::MIN; 3];
-        let mut best = f64::INFINITY;
-        let mut best_cut = None;
-        for cut in 0..BINS - 1 {
-            if counts[cut] == 0 {
-                continue;
-            }
-            left_counts += counts[cut];
-            for coordinate in 0..3 {
-                left_min[coordinate] = left_min[coordinate].min(minimum[cut][coordinate]);
-                left_max[coordinate] = left_max[coordinate].max(maximum[cut][coordinate]);
-            }
-            let right_count = right_counts[cut + 1];
-            if right_count == 0 {
-                continue;
-            }
-            // Costed as area x triangles for both children together, in the same units
-            // as the leaf comparison below. A child's area over the parent's is the
-            // chance a segment that reached the parent reaches it, so the sum estimates
-            // how many triangles a random segment will have to test.
-            let cost_unnormalised = area(left_min, left_max) * left_counts as f64
-                + area(right_min[cut + 1], right_max[cut + 1]) * right_count as f64;
-            if cost_unnormalised < best {
-                best = cost_unnormalised;
-                best_cut = Some((
-                    left_counts as usize,
-                    Aabb {
-                        min: left_min,
-                        max: left_max,
-                    },
-                    Aabb {
-                        min: right_min[cut + 1],
-                        max: right_max[cut + 1],
-                    },
-                ));
-            }
-        }
-
-        let (count, left, right) = match best_cut {
-            Some(best) => best,
-            None => return None,
-        };
-        // The same estimate for a leaf is the parent's area times every triangle in it:
-        // a segment that reaches the node then tests all of them. Splitting has to beat
-        // that, or the extra box tests would cost more than they save.
-        let leaf_cost = area(parent.min, parent.max) * range.len() as f64;
-        if best >= leaf_cost {
-            return None;
-        }
-        Some((count, left, right))
+    if order.len() <= LEAF_SIZE || depth >= MAX_DEPTH {
+        nodes[index].start = base as u32;
+        nodes[index].count = order.len() as u32;
+        return;
     }
+    let Some((pivot, left_box, right_box)) = divide(order, &box_, plan) else {
+        nodes[index].start = base as u32;
+        nodes[index].count = order.len() as u32;
+        return;
+    };
 
-    /// `low` and the bin width spanning this range's centroids on `axis`, or `None` if
-    /// they all coincide and no partition could separate them.
-    fn centroid_extent(&self, range: &std::ops::Range<usize>, axis: usize) -> Option<(f64, f64)> {
-        let mut low = f64::MAX;
-        let mut high = f64::MIN;
-        for &triangle in &self.order[range.clone()] {
-            let centre = self.centroids[triangle as usize][axis];
-            low = low.min(centre);
-            high = high.max(centre);
-        }
-        let span = high - low;
-        if span > 0.0 && span.is_finite() {
-            Some((low, span / BINS as f64))
+    let left_link = nodes.len() as u32;
+    let (left_slice, right_slice) = order.split_at_mut(pivot);
+    fill(left_slice, base, depth + 1, left_box, plan, nodes);
+    let right_link = nodes.len() as u32;
+    fill(right_slice, base + pivot, depth + 1, right_box, plan, nodes);
+    nodes[index].children = [left_link, right_link];
+}
+
+/// Choose the best cut and apply it, reporting the pivot and the two sides' boxes.
+///
+/// `None` means the triangles stay where they are: no axis separates their centroids, no
+/// cut beats testing them all in one leaf, or the best cut moved nothing.
+fn divide(order: &mut [u32], box_: &Aabb, plan: &Plan<'_>) -> Option<(usize, Aabb, Aabb)> {
+    let axis = box_.longest_axis();
+    let (low, width) = centroid_extent(order, axis, plan)?;
+    let split = cheapest_cut(order, axis, low, width, box_, plan)?;
+    let pivot = partition(order, split.threshold, axis, plan);
+    if pivot == 0 || pivot == order.len() {
+        return None;
+    }
+    Some((
+        pivot,
+        merge(&order[..pivot], plan),
+        merge(&order[pivot..], plan),
+    ))
+}
+
+/// Move the triangles left of `threshold` to the front and report how many there are.
+fn partition(order: &mut [u32], threshold: f64, axis: usize, plan: &Plan<'_>) -> usize {
+    let mut left = 0usize;
+    let mut right = order.len();
+    while left < right {
+        let centre = plan.measured[order[left] as usize].centroid[axis];
+        // A non-finite centroid cannot be ordered, and the binning put it at the start;
+        // sending it the same way here keeps the two views of "left" in step.
+        if centre < threshold || !centre.is_finite() {
+            left += 1;
         } else {
-            None
+            right -= 1;
+            order.swap(left, right);
+        }
+    }
+    left
+}
+
+/// The cut with the lowest expected cost, or `None` when no cut beats a leaf.
+///
+/// One pass bins the centroids along `axis` and records each bin's count and bounds; a
+/// sweep over the fifteen interior boundaries costs each one as the chance a segment that
+/// reached this node reaches a child, times the triangles waiting below it. Binned rather
+/// than exact: an exact sweep would sort the range at every node, which costs more than the
+/// tree it buys, and sixteen bins come within a few percent of the optimum in one pass.
+fn cheapest_cut(
+    order: &[u32],
+    axis: usize,
+    low: f64,
+    width: f64,
+    parent: &Aabb,
+    plan: &Plan<'_>,
+) -> Option<Split> {
+    let mut counts = [0u32; BINS];
+    let mut minimum = [[f64::MAX; 3]; BINS];
+    let mut maximum = [[f64::MIN; 3]; BINS];
+
+    for &triangle in order {
+        let centre = plan.measured[triangle as usize].centroid[axis];
+        let bin = (((centre - low) / width) as usize).min(BINS - 1);
+        counts[bin] += 1;
+        let source = &plan.measured[triangle as usize].bounds;
+        for coordinate in 0..3 {
+            minimum[bin][coordinate] = minimum[bin][coordinate].min(source.min[coordinate]);
+            maximum[bin][coordinate] = maximum[bin][coordinate].max(source.max[coordinate]);
         }
     }
 
-    fn make_leaf(&mut self, index: u32, range: std::ops::Range<usize>) {
-        self.nodes[index as usize].start = range.start as u32;
-        self.nodes[index as usize].count = (range.end - range.start) as u32;
+    // Right-hand totals, so trying each boundary in turn keeps only the left running.
+    let mut right_counts = [0u32; BINS + 1];
+    let mut right_min = [[f64::MAX; 3]; BINS + 1];
+    let mut right_max = [[f64::MIN; 3]; BINS + 1];
+    for bin in (0..BINS).rev() {
+        right_counts[bin] = right_counts[bin + 1] + counts[bin];
+        for coordinate in 0..3 {
+            let (bin_min, bin_max) = if counts[bin] > 0 {
+                (minimum[bin][coordinate], maximum[bin][coordinate])
+            } else {
+                (f64::MAX, f64::MIN)
+            };
+            right_min[bin][coordinate] = right_min[bin + 1][coordinate].min(bin_min);
+            right_max[bin][coordinate] = right_max[bin + 1][coordinate].max(bin_max);
+        }
     }
 
-    fn merge(&self, range: std::ops::Range<usize>) -> Aabb {
-        let mut box_ = Aabb::EMPTY;
-        for &triangle in &self.order[range] {
-            box_ = box_.extend(self.bounds[triangle as usize]);
+    let mut left_counts = 0u32;
+    let mut best = f64::INFINITY;
+    let mut best_bin = None;
+    let mut left_min = [f64::MAX; 3];
+    let mut left_max = [f64::MIN; 3];
+    for cut in 0..BINS - 1 {
+        if counts[cut] == 0 {
+            continue;
         }
-        box_
+        left_counts += counts[cut];
+        for coordinate in 0..3 {
+            left_min[coordinate] = left_min[coordinate].min(minimum[cut][coordinate]);
+            left_max[coordinate] = left_max[coordinate].max(maximum[cut][coordinate]);
+        }
+        if right_counts[cut + 1] == 0 {
+            continue;
+        }
+        let cost = area(left_min, left_max) * left_counts as f64
+            + area(right_min[cut + 1], right_max[cut + 1]) * right_counts[cut + 1] as f64;
+        if cost < best {
+            best = cost;
+            best_bin = Some(cut);
+        }
     }
+
+    let cut = best_bin?;
+    // A leaf costs the parent's area times every triangle in it — a segment that arrives
+    // tests all of them. A split has to beat that or its extra box tests cost more than the
+    // triangle tests they avoid.
+    if best >= area(parent.min, parent.max) * order.len() as f64 {
+        return None;
+    }
+    Some(Split {
+        threshold: low + (cut as f64 + 1.0) * width,
+    })
+}
+
+/// Where the best cut falls: a value on the split axis, because the partition compares
+/// centroids against it rather than trusting a bin number assigned earlier.
+struct Split {
+    threshold: f64,
+}
+
+/// `low` and the bin width spanning this range's centroids on `axis`, or `None` if they
+/// all coincide and no partition could separate them.
+fn centroid_extent(order: &[u32], axis: usize, plan: &Plan<'_>) -> Option<(f64, f64)> {
+    let mut low = f64::MAX;
+    let mut high = f64::MIN;
+    for &triangle in order {
+        let centre = plan.measured[triangle as usize].centroid[axis];
+        low = low.min(centre);
+        high = high.max(centre);
+    }
+    let span = high - low;
+    if span > 0.0 && span.is_finite() {
+        Some((low, span / BINS as f64))
+    } else {
+        None
+    }
+}
+
+/// Surface area — the SA in the heuristic — clamped at zero so a degenerate slab costs
+/// nothing rather than going negative through rounding.
+fn area(min: [f64; 3], max: [f64; 3]) -> f64 {
+    let span = [
+        (max[0] - min[0]).max(0.0),
+        (max[1] - min[1]).max(0.0),
+        (max[2] - min[2]).max(0.0),
+    ];
+    2.0 * (span[0] * span[1] + span[1] * span[2] + span[2] * span[0])
+}
+
+/// The union of the boxes of the triangles in `order`.
+fn merge(order: &[u32], plan: &Plan<'_>) -> Aabb {
+    let mut box_ = Aabb::EMPTY;
+    for &triangle in order {
+        box_ = box_.extend(plan.measured[triangle as usize].bounds);
+    }
+    box_
+}
+
+/// Copy the triangles into hierarchy order as [`Slot`] records.
+///
+/// Done once, after the tree is finished: the partition moves indices, which is cheap, and
+/// this pass turns them into bytes, which is not — so each record is written exactly once,
+/// in the order the traversal will read it.
+fn reorder(geo: &Geometry, order: &[u32]) -> Vec<Slot> {
+    order
+        .iter()
+        .map(|&index| {
+            let [a, b, c] = geo.triangles[index as usize];
+            let p0 = geo.positions[a as usize];
+            let e1 = sub(geo.positions[b as usize], p0);
+            let e2 = sub(geo.positions[c as usize], p0);
+            Slot {
+                p0,
+                e1,
+                e2,
+                edge_scale: dot(e1, e1) * dot(e2, e2),
+                verts: [a, b, c],
+            }
+        })
+        .collect()
 }
 
 #[inline]

@@ -141,11 +141,21 @@ pub fn bake(
     let baked = output::ao_obj(&obj, &coordinates, &names);
     #[cfg(feature = "count")]
     lap("format", &mut clock);
-    write(&names.object, &output::obj_text(&baked))?;
-    write(&names.material, &output::mtl_text(&names))?;
-    write_ramp(&names.texture)?;
     #[cfg(feature = "count")]
-    lap("write", &mut clock);
+    {
+        let text = output::obj_text(&baked);
+        lap("render obj", &mut clock);
+        write(&names.object, &text)?;
+        write(&names.material, &output::mtl_text(&names))?;
+        write_ramp(&names.texture)?;
+        lap("fs write", &mut clock);
+    }
+    #[cfg(not(feature = "count"))]
+    {
+        write(&names.object, &output::obj_text(&baked))?;
+        write(&names.material, &output::mtl_text(&names))?;
+        write_ramp(&names.texture)?;
+    }
 
     Ok(BakeReport {
         vertices: obj.vertices.len(),
