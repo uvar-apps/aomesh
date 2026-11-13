@@ -98,7 +98,28 @@ pub fn vertex_visibility(geo: &Geometry, samples: usize) -> Vec<f64> {
     // A mesh of coincident vertices has no diagonal to scale by; any positive
     // radius will do because nothing there can occlude anything.
     let radius = (geo.diagonal() * VIEW_RADIUS_FACTOR).max(1.0);
+    #[cfg(feature = "count")]
+    let built = std::time::Instant::now();
     let bvh = Bvh::build(geo);
+    #[cfg(feature = "count")]
+    eprintln!("{:>12} {:6.1} ms", "bvh build", built.elapsed().as_secs_f64() * 1e3);
+
+    // The sphere is one sphere about the whole mesh, not a per-vertex cone — what a
+    // vertex can see is measured from where that vertex stands, toward viewpoints that
+    // every vertex shares. So a viewpoint's position is the same for all of them, and
+    // resolving `center + radius · direction` once here rather than once per
+    // (vertex, viewpoint) removes six arithmetic ops from all 9.7M of them. Same
+    // expression, same rounding; this only moves where it is computed.
+    let viewpoints: Vec<[f64; 3]> = directions
+        .iter()
+        .map(|d| {
+            [
+                center[0] + radius * d[0],
+                center[1] + radius * d[1],
+                center[2] + radius * d[2],
+            ]
+        })
+        .collect();
 
     (0..geo.positions.len())
         .into_par_iter()
@@ -107,23 +128,21 @@ pub fn vertex_visibility(geo: &Geometry, samples: usize) -> Vec<f64> {
             let normal = geo.normals[index];
             let mut seen = 0.0f64;
             let mut total = 0.0f64;
-            for direction in &directions {
-                // Viewpoints are absolute positions on one sphere about the mesh, as
-                // the format describes, not a per-vertex cone: what a vertex can see
-                // is measured from where that vertex stands.
-                let to = [
-                    center[0] + radius * direction[0],
-                    center[1] + radius * direction[1],
-                    center[2] + radius * direction[2],
-                ];
+            for &to in &viewpoints {
                 let towards = [to[0] - from[0], to[1] - from[1], to[2] - from[2]];
+                // The sign of cos θ is the sign of this dot product, because
+                // `|towards|` is a length and so is never negative. Testing it here
+                // drops the back half of the sphere before paying for a square root
+                // and a division, which is what the rest of the body was spending on
+                // viewpoints that contribute nothing.
+                let onto = dot(towards, normal);
+                if onto <= 0.0 {
+                    continue;
+                }
                 // `normal` is a unit vector, so this is cos θ for the angle between
                 // the segment and the surface. It is zero at 90°, which is the point:
                 // a grazing viewpoint votes, but its vote weighs nothing.
-                let cos = dot(towards, normal) / dot(towards, towards).sqrt();
-                if cos <= 0.0 {
-                    continue;
-                }
+                let cos = onto / dot(towards, towards).sqrt();
                 total += cos;
                 if !bvh.segment_blocked(from, to, index as u32) {
                     seen += cos;

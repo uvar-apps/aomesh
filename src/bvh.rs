@@ -1,71 +1,65 @@
 //! A bounding-volume hierarchy over the mesh's triangles, queried with
 //! blocked/unblocked segments.
 //!
-//! Per-vertex occlusion is a lot of rays: 38k vertices times 256 viewpoints is 9.7M
-//! segments, and testing each against every triangle of a 76k-triangle mesh is 7×10¹¹
-//! intersection tests. The hierarchy turns that into a depth-first walk down only the
-//! boxes the segment crosses.
+//! Per-vertex occlusion is a lot of rays: 10k vertices times 256 viewpoints is
+//! 2.5M segments, and testing each against every triangle of a 20k-triangle
+//! mesh is 5×10¹⁰ intersection tests. The hierarchy turns that into a depth-first
+//! walk down only the boxes the segment actually crosses.
 //!
-//! Three properties matter for the numbers the bake reports:
+//! Two properties matter for the numbers the bake reports:
 //!
-//! * **Triangle order is never assumed.** The hierarchy permutes triangle indices
-//!   internally and the caller's [`Geometry`](crate::geometry::Geometry) stays untouched.
-//! * **A hit is scale-invariant.** Both the parallel test and the accepted `t` range are
-//!   ratios, so a mesh authored in microns and one authored in kilometres report the same
-//!   visibility.
-//! * **The answer does not depend on how the work was batched.** See below.
-//!
-//! # Where the vector instructions went
-//!
-//! The leaf tests four triangles' bounds at once on [`wide::f64x4`] — four lanes of IEEE
-//! arithmetic in step. That is the one place in this loop where SIMD pays, and it pays
-//! because it is *rejection*: a shadow ray usually hits nothing, a box test is branch-free
-//! so there is nothing to lose by running all four lanes, and `wide` maps it onto whatever
-//! the target offers (SSE/AVX on x86-64, NEON on Apple silicon and other aarch64, a scalar
-//! fallback where there is no SIMD at all). No `target-cpu` flag is needed or set, so a
-//! binary is not tied to the machine that built it.
-//!
-//! Only the lanes whose box the segment actually crosses go on to the exact
-//! Möller–Trumbore test, and that one runs per triangle in scalar code, where it can quit
-//! at the first failed barycentric test.
-//!
-//! That split was measured, not assumed. Running four *exact* intersections at once —
-//! barycentrics, sign folding and all — measured slower than the scalar loop it replaced:
-//! batching forces every lane through the full arithmetic, while the common case is a
-//! miss that scalar code abandons after a couple of operations in a triangle's favour.
-//! Vectorising the filter and leaving the early-out alone is what made this faster than
-//! the original.
-//!
-//! Lanes are IEEE islands and each one does the same arithmetic a scalar test would, so
-//! which triangle a ray hits does not depend on grouping. The exact assertions in
-//! `tests/ao_values.rs` cover that: `1.0` for open surfaces, `0.0` for a sealed cavity, and
-//! a sealed box checked against a direction oracle, all of which hold bit-for-bit.
+//! * **Triangle order is never assumed.** The hierarchy permutes triangle
+//!   indices internally and the caller's [`Geometry`](crate::geometry::Geometry)
+//!   stays untouched.
+//! * **A hit is scale-invariant.** Both the "ray parallel to the triangle" test
+//!   and the parametric hit range are ratios, so a mesh authored in microns and
+//!   one authored in kilometres report the same visibility.
 
 use crate::geometry::Geometry;
-// `cmp_gt` and friends arrive through these traits; they yield a full-bit mask per lane.
-use wide::{CmpGt, f64x4};
 
-/// Triangles per leaf, which is also the width of the vectorised bounds test.
+/// Temporary instrumentation: what one shadow ray actually walks.
+#[cfg(feature = "count")]
+pub mod counters {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    pub static RAYS: AtomicU64 = AtomicU64::new(0);
+    pub static POPS: AtomicU64 = AtomicU64::new(0);
+    pub static BOXES_CROSSED: AtomicU64 = AtomicU64::new(0);
+    pub static LEAVES: AtomicU64 = AtomicU64::new(0);
+    pub static TRIS: AtomicU64 = AtomicU64::new(0);
+    pub static SKIPPED_INCIDENT: AtomicU64 = AtomicU64::new(0);
+    pub static MT: AtomicU64 = AtomicU64::new(0);
+    pub static HITS: AtomicU64 = AtomicU64::new(0);
+    pub fn add(slot: &AtomicU64, n: u64) { slot.fetch_add(n, Ordering::Relaxed); }
+}
+
+/// Triangles per leaf. Below this the traversal costs more than the brute-force
+/// test it replaces.
 const LEAF_SIZE: usize = 4;
 
-/// Lanes in one group.
-const LANES: usize = 4;
+/// Partition candidates per node in the surface-area-heuristic scan.
+///
+/// Binned rather than exact: an exact SAH sweep would sort the range at every node,
+/// which costs more than the tree it buys back. Sixteen bins find a split within a
+/// few percent of the optimum in one pass over the triangles, and the per-bin bounds
+/// that pass builds double as the children's bounds, which removes the O(range) merge
+/// the median split used to do at every node.
+const BINS: usize = 16;
 
-/// Recursion cap. Splitting stops early on degenerate clusters; this bounds the worst
-/// case so the traversal stack cannot outgrow [`STACK_CAPACITY`].
+/// Recursion cap. Splitting stops early on degenerate clusters; this bounds the
+/// worst case so the traversal stack cannot outgrow [`STACK_CAPACITY`].
 const MAX_DEPTH: usize = 40;
 
-/// Fixed capacity of the traversal stack; a tree of [`MAX_DEPTH`] needs at most that many
-/// pending nodes.
+/// Fixed-point capacity of the traversal stack; a tree of [`MAX_DEPTH`] needs at
+/// most that many pending nodes.
 const STACK_CAPACITY: usize = MAX_DEPTH + 4;
 
-/// Near-parallel rejection, squared: `|det| ≤ 1e-12 · |dir| · |e1| · |e2|`. A coplanar
-/// segment and triangle form a singular system whose barycentric answer is meaningless, so
-/// it is rejected rather than evaluated.
+/// Near-parallel rejection, squared: `|det| ≤ 1e-12 · |dir| · |e1| · |e2|`.
+/// A coplanar segment and triangle produce a singular system whose barycentric
+/// solution is meaningless, so it must be rejected rather than evaluated.
 const PARALLEL_EPS2: f64 = 1e-24;
 
-/// A hit strictly closer than this fraction of the segment is the surface the ray started
-/// on, not an occluder.
+/// A hit strictly closer than this fraction of the segment is the surface the
+/// ray started on, not an occluder.
 const T_START: f64 = 1e-9;
 
 #[derive(Clone, Copy, Debug)]
@@ -140,44 +134,19 @@ impl Aabb {
             2
         }
     }
-}
 
-/// Node bounds, stored as `f32` rounded outward.
-///
-/// Traversal is a chain of dependent loads, so the cost is memory, not arithmetic: halving
-/// what a node costs to carry is the lever that a wider instruction does not pull. Rounding
-/// the box outward makes it a superset of the true bounds, so it can report a crossing that
-/// is not there — and the exact test then says so — but it can never reject a ray that
-/// really does reach the triangles below. Decisions therefore do not change.
-#[derive(Clone, Copy, Debug)]
-struct Wide {
-    min: [f32; 3],
-    max: [f32; 3],
-}
-
-impl Wide {
-    fn widen(box_: &Aabb) -> Wide {
-        let mut min = [0.0f32; 3];
-        let mut max = [0.0f32; 3];
-        for axis in 0..3 {
-            // Outward, so the stored box encloses the f64 box even where the cast rounds
-            // the other way. `f32::next_down`/`next_up` would express this directly but
-            // stabilised after this crate's MSRV, so a scale factor is used instead: 2.4e-7
-            // is about two ULPs, comfortably more than the half-ULP a nearest cast can
-            // lose, and one extra ULP of slack costs nothing but a rare pointless descent.
-            min[axis] = widen_away_from_zero(box_.min[axis] as f32, -1.0);
-            max[axis] = widen_away_from_zero(box_.max[axis] as f32, 1.0);
-        }
-        Wide { min, max }
-    }
-
-    /// The same slab test [`Aabb::crosses`] runs, reading the narrower store and comparing
-    /// in `f64`: the precision goes into the box, never into the ray.
+    /// Slab test against the segment `origin + dir·t`, `t ∈ (t_min, t_max)`.
+    ///
+    /// A `dir` component of zero makes `inv_dir` infinite and the slab bounds
+    /// NaN when the origin lies exactly in that slab plane — which is the
+    /// everyday case for a ray starting on axis-aligned geometry. `f64::min` and
+    /// `f64::max` discard a NaN operand, so such an axis simply imposes no
+    /// constraint, as it should: the ray is parallel to the slab and inside it.
     fn crosses(&self, origin: [f64; 3], inv_dir: [f64; 3], t_min: f64, t_max: f64) -> bool {
         let (mut entered, mut exited) = (t_min, t_max);
         for axis in 0..3 {
-            let lo = (f64::from(self.min[axis]) - origin[axis]) * inv_dir[axis];
-            let hi = (f64::from(self.max[axis]) - origin[axis]) * inv_dir[axis];
+            let lo = (self.min[axis] - origin[axis]) * inv_dir[axis];
+            let hi = (self.max[axis] - origin[axis]) * inv_dir[axis];
             let (lo, hi) = if lo > hi { (hi, lo) } else { (lo, hi) };
             entered = entered.max(lo);
             exited = exited.min(hi);
@@ -189,24 +158,12 @@ impl Wide {
     }
 }
 
-/// Move `v` about two ULPs in the direction `sign`, treating exact zero as already wide
-/// enough (a box edge at zero comes from a coordinate that really is zero, and the cast
-/// of zero is exact).
-fn widen_away_from_zero(v: f32, sign: f32) -> f32 {
-    if v == 0.0 {
-        0.0
-    } else {
-        let factor = 1.0 + sign * 2.4e-7;
-        v * factor
-    }
-}
-
 #[derive(Clone, Copy, Debug)]
 struct Node {
-    bounds: Wide,
+    bounds: Aabb,
     /// Child node indices; meaningless on a leaf.
     children: [u32; 2],
-    /// `[start, start + count)` span of triangle slots, zero on an internal node.
+    /// `[start, start + count)` span of [`Bvh::slots`]; zero on an internal node.
     start: u32,
     count: u32,
 }
@@ -217,34 +174,37 @@ impl Node {
     }
 }
 
+/// One triangle in the form the intersection test wants, so a leaf reads its
+/// triangles straight out of this record instead of gathering them.
+///
+/// The traversal used to recover `p0`, `e1` and `e2` from
+/// [`Geometry::positions`] on every test — three loads at three unrelated
+/// addresses, chosen by a triangle index, so the fetch that a hit depends on is
+/// usually a cache miss by the time the test reaches it. Storing the two edge
+/// vectors alongside the origin, in leaf order, replaces those gathers with one
+/// sequential read: nine `f64` plus the vertex indices, 96 bytes, and a leaf's
+/// four triangles sit in six adjacent cache lines.
+///
+/// The values are the same ones the gathers produced — `e1` is `positions[b] -
+/// positions[a]` wherever it is computed — so no intersection decision changes.
+#[derive(Clone, Copy, Debug)]
+struct Slot {
+    p0: [f64; 3],
+    e1: [f64; 3],
+    e2: [f64; 3],
+    /// `|e1|² · |e2|²`, for the scale-invariant parallel test.
+    edge_scale: f64,
+    /// The three corners, to skip the surface a ray starts on.
+    verts: [u32; 3],
+}
+
 /// A hierarchy over one [`Geometry`].
 #[derive(Clone, Debug)]
 pub struct Bvh {
     nodes: Vec<Node>,
-    /// Triangle corners per slot: `p0` and the two edge vectors.
-    p0: Vec<[f64; 3]>,
-    e1: Vec<[f64; 3]>,
-    e2: Vec<[f64; 3]>,
-    /// `|e1|² · |e2|²` per slot, for the scale-invariant parallel test.
-    edge_scale: Vec<f64>,
-    /// The three vertex indices per slot, for skipping the surface the ray starts on.
-    verts: Vec<[u32; 3]>,
-    /// Box bounds split into component arrays, so one group of four is four contiguous
-    /// loads per component and the vector test reads them without gathering.
-    bxmin: [Vec<f64>; 3],
-    bxmax: [Vec<f64>; 3],
+    /// Triangles in hierarchy order; a leaf's `start..start + count` indexes this.
+    slots: Vec<Slot>,
     bounds: Aabb,
-}
-
-impl Builder {
-    /// The f64 bounds of the whole tree, taken before the nodes were narrowed.
-    fn root_bounds(&self) -> Aabb {
-        let mut box_ = Aabb::EMPTY;
-        for &triangle in &self.order {
-            box_ = box_.extend(self.bounds[triangle as usize]);
-        }
-        box_
-    }
 }
 
 impl Default for Bvh {
@@ -252,21 +212,15 @@ impl Default for Bvh {
     fn default() -> Self {
         Self {
             nodes: Vec::new(),
-            p0: Vec::new(),
-            e1: Vec::new(),
-            e2: Vec::new(),
-            edge_scale: Vec::new(),
-            verts: Vec::new(),
-            bxmin: [Vec::new(), Vec::new(), Vec::new()],
-            bxmax: [Vec::new(), Vec::new(), Vec::new()],
+            slots: Vec::new(),
             bounds: Aabb::EMPTY,
         }
     }
 }
 
 impl Bvh {
-    /// Build a hierarchy over `geo`. Cheap enough to rebuild per run; an empty mesh yields
-    /// a hierarchy that blocks nothing.
+    /// Build a hierarchy over `geo`. Cheap enough to rebuild per run; an empty
+    /// mesh yields a hierarchy that blocks nothing.
     #[must_use]
     pub fn build(geo: &Geometry) -> Self {
         if geo.triangles.is_empty() {
@@ -277,69 +231,24 @@ impl Bvh {
             order: (0..geo.triangles.len() as u32).collect(),
             bounds: Vec::with_capacity(geo.triangles.len()),
             centroids: Vec::with_capacity(geo.triangles.len()),
+            bins: vec![0; geo.triangles.len()],
         };
         for triangle in &geo.triangles {
             let box_ = Aabb::from_triangle(geo, *triangle);
+            // Indexed by original triangle index, and it stays that way: the
+            // hierarchy permutes `order`, never these tables.
             builder.bounds.push(box_);
             builder.centroids.push(box_.centroid());
         }
-        builder.split(0..builder.order.len(), 0);
-        let bounds = builder.root_bounds();
-
-        let mut bvh = Bvh {
-            nodes: builder.nodes,
+        let root_box = builder.merge(0..builder.order.len());
+        let root = builder.split(0..builder.order.len(), 0, root_box);
+        let bounds = builder.nodes[root as usize].bounds;
+        let slots = builder.reorder(geo);
+        let nodes = pack_siblings(builder.nodes, root as usize);
+        Bvh {
+            nodes,
+            slots,
             bounds,
-            ..Bvh::default()
-        };
-        bvh.lay_out_slots(geo, &builder.order, &builder.bounds);
-        bvh
-    }
-
-    /// Copy triangles into the hierarchy's slot order and pad with a full group of
-    /// degenerate slots, so a four-lane read starting anywhere below the count stays
-    /// inside the arrays.
-    ///
-    /// A padded slot has coincident corners, so its determinant is zero and the parallel
-    /// test rejects it: it can never be reported as a hit.
-    fn lay_out_slots(&mut self, geo: &Geometry, order: &[u32], bounds: &[Aabb]) {
-        let capacity = order.len() + LANES;
-        self.p0.reserve_exact(capacity);
-        self.e1.reserve_exact(capacity);
-        self.e2.reserve_exact(capacity);
-        self.edge_scale.reserve_exact(capacity);
-        self.verts.reserve_exact(capacity);
-        for axis in 0..3 {
-            self.bxmin[axis].reserve_exact(capacity);
-            self.bxmax[axis].reserve_exact(capacity);
-        }
-
-        for &index in order {
-            let [a, b, c] = geo.triangles[index as usize];
-            let p0 = geo.positions[a as usize];
-            let e1 = sub(geo.positions[b as usize], p0);
-            let e2 = sub(geo.positions[c as usize], p0);
-            let box_ = bounds[index as usize];
-            self.p0.push(p0);
-            self.e1.push(e1);
-            self.e2.push(e2);
-            self.edge_scale.push(dot(e1, e1) * dot(e2, e2));
-            self.verts.push([a, b, c]);
-            for axis in 0..3 {
-                self.bxmin[axis].push(box_.min[axis]);
-                self.bxmax[axis].push(box_.max[axis]);
-            }
-        }
-
-        while self.p0.len() < capacity {
-            self.p0.push([0.0; 3]);
-            self.e1.push([0.0; 3]);
-            self.e2.push([0.0; 3]);
-            self.edge_scale.push(0.0);
-            self.verts.push([u32::MAX; 3]);
-            for axis in 0..3 {
-                self.bxmin[axis].push(0.0);
-                self.bxmax[axis].push(0.0);
-            }
         }
     }
 
@@ -351,11 +260,11 @@ impl Bvh {
 
     /// True when the segment `from` → `to` crosses a triangle.
     ///
-    /// Triangles referencing `ignore_vertex` are skipped: the vertex sits *on* the surface
-    /// it is testing, so without this every neighbouring triangle would shadow it at t ≈ 0
-    /// and report it fully occluded. Skipping by vertex index is both cheaper and more
-    /// exact than offsetting the ray origin, which cannot say how far it may move without
-    /// guessing.
+    /// Triangles that reference `ignore_vertex` are skipped. A vertex sits *on*
+    /// the surface it is testing, so without this every triangle touching that
+    /// vertex would shadow it at t ≈ 0 and report it fully occluded. Skipping by
+    /// vertex index is both cheaper and more exact than offsetting the origin,
+    /// which cannot say how far it may move without guessing.
     #[must_use]
     pub fn segment_blocked(&self, from: [f64; 3], to: [f64; 3], ignore_vertex: u32) -> bool {
         if self.nodes.is_empty() {
@@ -368,118 +277,163 @@ impl Bvh {
         }
         let inv_dir = [1.0 / dir[0], 1.0 / dir[1], 1.0 / dir[2]];
 
+        #[cfg(feature = "count")]
+        counters::add(&counters::RAYS, 1);
+        if !self.nodes[0].bounds.crosses(from, inv_dir, T_START, 1.0) {
+            return false;
+        }
+        // The stack holds only nodes whose box the segment is known to cross: a
+        // node's children are tested here, at the parent, rather than being pushed
+        // blind and tested when popped. Two consequences, both measured — half as
+        // many entries to push and pop, and the pair of child boxes is a pair of
+        // *independent* loads issued together (adjacent in memory since
+        // `pack_siblings`) instead of two dependent chases at opposite ends of the
+        // walk. Of the 55 nodes a segment used to reach, 23 were popped only to be
+        // rejected.
         let mut stack = [0u32; STACK_CAPACITY];
         let mut top = 1usize;
         stack[0] = 0;
         while top > 0 {
             top -= 1;
             let node = &self.nodes[stack[top] as usize];
-            if !node.bounds.crosses(from, inv_dir, T_START, 1.0) {
-                continue;
-            }
+            #[cfg(feature = "count")]
+            counters::add(&counters::POPS, 1);
             if node.is_leaf() {
-                let end = node.start + node.count;
-                let mut base = node.start as usize;
-                while base < end as usize {
-                    // Vectorised rejection first …
-                    let mut crossing = self.lane_mask_crossing(base, from, inv_dir);
-                    // … then the exact test only for the lanes it could not rule out.
-                    while crossing != 0 {
-                        let lane = crossing.trailing_zeros() as usize;
-                        crossing &= crossing - 1;
-                        if self.exact_hit(base + lane, from, dir, dir2, ignore_vertex) {
-                            return true;
-                        }
+                #[cfg(feature = "count")]
+                {
+                    counters::add(&counters::LEAVES, 1);
+                    counters::add(&counters::TRIS, node.count as u64);
+                }
+                let span = node.start as usize..(node.start + node.count) as usize;
+                for slot in &self.slots[span] {
+                    if slot.verts[0] == ignore_vertex
+                        || slot.verts[1] == ignore_vertex
+                        || slot.verts[2] == ignore_vertex
+                    {
+                        #[cfg(feature = "count")]
+                        counters::add(&counters::SKIPPED_INCIDENT, 1);
+                        continue;
                     }
-                    base += LANES;
+                    #[cfg(feature = "count")]
+                    counters::add(&counters::MT, 1);
+                    if crosses_triangle(slot, from, dir, dir2) {
+                        #[cfg(feature = "count")]
+                        counters::add(&counters::HITS, 1);
+                        return true;
+                    }
                 }
                 continue;
             }
-            // One pending sibling per level of the current path, and the tree is no deeper
-            // than MAX_DEPTH, so two more entries always fit.
+            // Only children the segment actually reaches are kept.
+            #[cfg(feature = "count")]
+            counters::add(&counters::BOXES_CROSSED, 2);
+            let left = &self.nodes[node.children[0] as usize];
+            let right = &self.nodes[node.children[1] as usize];
+            let left_crosses = left.bounds.crosses(from, inv_dir, T_START, 1.0);
+            let right_crosses = right.bounds.crosses(from, inv_dir, T_START, 1.0);
+            // One pending sibling per level of the current path, and the tree is no
+            // deeper than MAX_DEPTH, so two more entries always fit.
             debug_assert!(top + 2 <= STACK_CAPACITY);
-            stack[top] = node.children[0];
-            stack[top + 1] = node.children[1];
-            top += 2;
+            if left_crosses {
+                stack[top] = node.children[0];
+                top += 1;
+            }
+            if right_crosses {
+                stack[top] = node.children[1];
+                top += 1;
+            }
         }
         false
     }
-
-    /// Four triangle boxes tested at once against the segment; bit *i* is set when lane
-    /// *i*'s box is crossed.
-    ///
-    /// Branch-free by design: all four lanes run whether or not they matter, which is
-    /// exactly what a rejection test wants. The arithmetic and the NaN handling mirror
-    /// [`Aabb::crosses`], so a lane reports crossing here if and only if the scalar slab
-    /// test would have.
-    fn lane_mask_crossing(&self, base: usize, origin: [f64; 3], inv_dir: [f64; 3]) -> i32 {
-        let mut entered = f64x4::splat(T_START);
-        let mut exited = f64x4::splat(1.0);
-        for axis in 0..3 {
-            let o = f64x4::splat(origin[axis]);
-            let inv = f64x4::splat(inv_dir[axis]);
-            let lo = (group(&self.bxmin[axis], base) - o) * inv;
-            let hi = (group(&self.bxmax[axis], base) - o) * inv;
-            // `min`/`max` here, not `fast_min`/`fast_max`: the fast forms leave NaN
-            // behaviour unspecified, and NaN bounds are the normal result of a ray running
-            // parallel to a slab it lies inside. These drop a NaN lane operand, which is
-            // what `f64::min`/`max` do in the scalar test.
-            entered = entered.max(lo.min(hi));
-            exited = exited.min(lo.max(hi));
-        }
-        // Crossing keeps a lane unless it provably left the slab: comparing false for NaN
-        // matches the scalar loop, which likewise does not bail on a NaN bound.
-        (!entered.cmp_gt(exited)).move_mask()
-    }
-
-    /// Möller–Trumbore, two-sided, for one slot.
-    ///
-    /// `t` is a fraction of the whole segment because `dir` is the whole segment, so the
-    /// accepted range needs no length and does not depend on the model's units.
-    fn exact_hit(
-        &self,
-        slot: usize,
-        from: [f64; 3],
-        dir: [f64; 3],
-        dir2: f64,
-        ignore_vertex: u32,
-    ) -> bool {
-        let tri = self.verts[slot];
-        if tri[0] == ignore_vertex || tri[1] == ignore_vertex || tri[2] == ignore_vertex {
-            return false;
-        }
-        let e1 = self.e1[slot];
-        let e2 = self.e2[slot];
-        let pv = cross(dir, e2);
-        let det = dot(e1, pv);
-        if det * det <= PARALLEL_EPS2 * dir2 * self.edge_scale[slot] {
-            return false;
-        }
-        let inv_det = 1.0 / det;
-        let sv = sub(from, self.p0[slot]);
-        let u = dot(sv, pv) * inv_det;
-        if !(0.0..=1.0).contains(&u) {
-            return false;
-        }
-        let qv = cross(sv, e1);
-        let v = dot(dir, qv) * inv_det;
-        if v < 0.0 || u + v > 1.0 {
-            return false;
-        }
-        let t = dot(e2, qv) * inv_det;
-        t > T_START && t < 1.0
-    }
 }
 
-/// One group of four lanes starting at `base`.
-#[inline]
-fn group(values: &[f64], base: usize) -> f64x4 {
-    f64x4::new([
-        values[base],
-        values[base + 1],
-        values[base + 2],
-        values[base + 3],
-    ])
+/// Möller–Trumbore, two-sided: winding tells us nothing about occlusion, and
+/// `t` is a fraction of the segment because `dir` is the whole segment.
+///
+/// Each test bails at the first barycentric condition it fails, which is why the
+/// intersection stays scalar: a shadow ray usually hits nothing, and a miss costs
+/// a handful of operations here rather than the full arithmetic a batched lane
+/// would have to complete. See the module documentation for what that means for
+/// the vector instructions.
+fn crosses_triangle(slot: &Slot, from: [f64; 3], dir: [f64; 3], dir2: f64) -> bool {
+    let e1 = slot.e1;
+    let e2 = slot.e2;
+    let pv = cross(dir, e2);
+    let det = dot(e1, pv);
+    if det * det <= PARALLEL_EPS2 * dir2 * slot.edge_scale {
+        return false;
+    }
+    let inv_det = 1.0 / det;
+    let sv = sub(from, slot.p0);
+    let u = dot(sv, pv) * inv_det;
+    if !(0.0..=1.0).contains(&u) {
+        return false;
+    }
+    let qv = cross(sv, e1);
+    let v = dot(dir, qv) * inv_det;
+    if v < 0.0 || u + v > 1.0 {
+        return false;
+    }
+    let t = dot(e2, qv) * inv_det;
+    t > T_START && t < 1.0
+}
+
+/// Rebuild the node array depth-first with the two children of every node next to
+/// each other.
+///
+/// `Builder::split` lays the tree out in the order the recursion creates it, which
+/// puts an internal node's *left* child immediately after itself and its *right*
+/// child after everything in the left subtree — the one index the traversal cannot
+/// prefetch from the parent. Each `Node` is exactly 64 bytes, one cache line, so a
+/// pair stored side by side is the two lines a descending segment will want, in the
+/// order it wants them.
+///
+/// Slot numbers change; nothing else does. Every node keeps its box, its count and
+/// its span of [`Bvh::slots`], and the links are rewritten from the same placement
+/// table, so a segment reaches exactly the triangles it reached before.
+fn pack_siblings(nodes: Vec<Node>, root: usize) -> Vec<Node> {
+    // New index of each old node, filled as slots are handed out.
+    let mut placed = vec![u32::MAX; nodes.len()];
+    let mut packed: Vec<Node> = Vec::with_capacity(nodes.len());
+    // Old index of each packed entry, so the links can be resolved afterwards: a
+    // node's children are usually placed after it, so their new numbers are not
+    // known at the moment it is copied.
+    let mut origin: Vec<u32> = Vec::with_capacity(nodes.len());
+
+    placed[root] = 0;
+    packed.push(nodes[root]);
+    origin.push(root as u32);
+
+    // Pending internal nodes. Popping one reserves two adjacent slots for its
+    // children and queues them, left last so the left subtree is packed next.
+    let mut pending = vec![root];
+    while let Some(old) = pending.pop() {
+        let node = nodes[old];
+        if node.is_leaf() {
+            continue;
+        }
+        for &child in &node.children {
+            let child = child as usize;
+            placed[child] = packed.len() as u32;
+            packed.push(nodes[child]);
+            origin.push(child as u32);
+        }
+        pending.push(node.children[1] as usize);
+        pending.push(node.children[0] as usize);
+    }
+
+    debug_assert_eq!(packed.len(), nodes.len(), "every node placed once");
+    for index in 0..packed.len() {
+        let old = nodes[origin[index] as usize];
+        if old.is_leaf() {
+            continue;
+        }
+        packed[index].children = [
+            placed[old.children[0] as usize],
+            placed[old.children[1] as usize],
+        ];
+    }
+    packed
 }
 
 /// Build state; exists so the scratch tables do not outlive the build.
@@ -488,16 +442,46 @@ struct Builder {
     order: Vec<u32>,
     bounds: Vec<Aabb>,
     centroids: Vec<[f64; 3]>,
+    /// Bin index of each triangle, written by [`Builder::bin`] and read by the
+    /// partition that follows it; a stale label is never read, because every node
+    /// labels its own triangles before moving them.
+    bins: Vec<u8>,
 }
 
 impl Builder {
-    /// Partition `range` of [`Builder::order`] and return the node index. Children are
-    /// pushed after the parent, so the parent's entry is finished once both subtrees exist.
-    fn split(&mut self, range: std::ops::Range<usize>, depth: usize) -> u32 {
-        let box_ = self.merge(range.clone());
+    /// Copy the triangles into hierarchy order as [`Slot`] records.
+    ///
+    /// Done once, after the tree is finished: the partition moves indices, which
+    /// is cheap, and this pass turns them into bytes, which is not — so the
+    /// records are written exactly once in the order the traversal will read them.
+    fn reorder(&self, geo: &Geometry) -> Vec<Slot> {
+        self.order
+            .iter()
+            .map(|&index| {
+                let [a, b, c] = geo.triangles[index as usize];
+                let p0 = geo.positions[a as usize];
+                let e1 = sub(geo.positions[b as usize], p0);
+                let e2 = sub(geo.positions[c as usize], p0);
+                Slot {
+                    p0,
+                    e1,
+                    e2,
+                    edge_scale: dot(e1, e1) * dot(e2, e2),
+                    verts: [a, b, c],
+                }
+            })
+            .collect()
+    }
+
+    /// Partition `range` of [`Builder::order`] and return the node index.
+    ///
+    /// `box_` is the union of the range's triangles, handed down from the parent's bin
+    /// aggregates rather than recomputed here. Children are pushed after the parent, so
+    /// a node's own entry is finished once both subtrees exist.
+    fn split(&mut self, range: std::ops::Range<usize>, depth: usize, box_: Aabb) -> u32 {
         let index = self.nodes.len() as u32;
         self.nodes.push(Node {
-            bounds: Wide::widen(&box_),
+            bounds: box_,
             children: [0; 2],
             start: 0,
             count: 0,
@@ -509,42 +493,159 @@ impl Builder {
         }
 
         let axis = box_.longest_axis();
-        // `select_nth_unstable_by` counts from the start of the slice it is given, so the
-        // split point is a length here and only becomes absolute in the child ranges.
-        let offset = range.len() / 2;
-        // A partition only makes progress if the centroids straddle the pivot; a cluster
-        // sharing one position would otherwise recurse forever.
-        if self.centroid_spread(&range, axis) <= 0.0 {
+        let Some((low, width)) = self.centroid_extent(&range, axis) else {
+            // Every centroid shares this coordinate, so no split on this axis can
+            // make progress; the node keeps its triangles.
             self.make_leaf(index, range);
             return index;
-        }
-        self.order[range.clone()].select_nth_unstable_by(offset, |a, b| {
-            self.centroids[*a as usize][axis]
-                .partial_cmp(&self.centroids[*b as usize][axis])
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-        let pivot = range.start + offset;
+        };
 
-        let left = self.split(range.start..pivot, depth + 1);
-        let right = self.split(pivot..range.end, depth + 1);
+        let partition = self.bin(range.clone(), axis, low, width, box_);
+        let Some((left_count, left, right)) = partition else {
+            self.make_leaf(index, range);
+            return index;
+        };
+
+        // Move the cheapest cut's triangles to the front by rank: `left_count` is the
+        // number of triangles in the bins at or below the cut, so ordering by bin index
+        // and stopping there puts exactly those in the left child.
+        let Builder {
+            order, bins, ..
+        } = self;
+        order[range.clone()].select_nth_unstable_by(left_count, |a, b| {
+            bins[*a as usize].cmp(&bins[*b as usize])
+        });
+        let pivot = range.start + left_count;
+        debug_assert!(left_count > 0 && left_count < range.len(), "split makes progress");
+
+        let left_child = self.split(range.start..pivot, depth + 1, left);
+        let right_child = self.split(pivot..range.end, depth + 1, right);
         // The children partition the same triangle set, so `box_` is already their union.
         self.nodes[index as usize] = Node {
-            bounds: Wide::widen(&box_),
-            children: [left, right],
+            bounds: box_,
+            children: [left_child, right_child],
             start: 0,
             count: 0,
         };
         index
     }
 
-    fn make_leaf(&mut self, index: u32, range: std::ops::Range<usize>) {
-        self.nodes[index as usize].start = range.start as u32;
-        self.nodes[index as usize].count = (range.end - range.start) as u32;
+    /// Bin `range` along `axis` and cost every interior cut.
+    ///
+    /// Returns how many triangles the best cut puts on the left, with the bounds of the
+    /// two sides, or `None` when no cut beats keeping the triangles in one leaf. One pass fills the bins, a second
+    /// sweeps the left side, a third the right; each bin carries the count and bounds of
+    /// the triangles that fell in it, which is all the heuristic reads.
+    fn bin(
+        &mut self,
+        range: std::ops::Range<usize>,
+        axis: usize,
+        low: f64,
+        width: f64,
+        parent: Aabb,
+    ) -> Option<(usize, Aabb, Aabb)> {
+        let mut counts = [0u32; BINS];
+        let mut minimum = [[f64::MAX; 3]; BINS];
+        let mut maximum = [[f64::MIN; 3]; BINS];
+
+        for position in range.clone() {
+            let triangle = self.order[position] as usize;
+            let centroid = self.centroids[triangle][axis];
+            let bin = (((centroid - low) / width) as usize).min(BINS - 1);
+            // Labelled by triangle, not by position: the partition below compares the
+            // triangles it moves, and a triangle appears exactly once in `order`, so
+            // its label follows it wherever it is swapped to.
+            self.bins[triangle] = bin as u8;
+            counts[bin] += 1;
+            let source = &self.bounds[triangle];
+            for coordinate in 0..3 {
+                minimum[bin][coordinate] = minimum[bin][coordinate].min(source.min[coordinate]);
+                maximum[bin][coordinate] = maximum[bin][coordinate].max(source.max[coordinate]);
+            }
+        }
+
+        /// Surface area, the SA in SAH. A box's own area normalises the split cost, so
+        /// what is compared is the fraction of the parent's surface each child covers,
+        /// weighted by how many triangles it holds.
+        fn area(min: [f64; 3], max: [f64; 3]) -> f64 {
+            let span = [
+                (max[0] - min[0]).max(0.0),
+                (max[1] - min[1]).max(0.0),
+                (max[2] - min[2]).max(0.0),
+            ];
+            2.0 * (span[0] * span[1] + span[1] * span[2] + span[2] * span[0])
+        }
+
+        // Right-hand aggregates, so the sweep over cuts keeps only the left running.
+        let mut right_counts = [0u32; BINS + 1];
+        let mut right_min = [[f64::MAX; 3]; BINS + 1];
+        let mut right_max = [[f64::MIN; 3]; BINS + 1];
+        for bin in (0..BINS).rev() {
+            right_counts[bin] = right_counts[bin + 1] + counts[bin];
+            for coordinate in 0..3 {
+                right_min[bin][coordinate] = right_min[bin + 1][coordinate]
+                    .min(if counts[bin] > 0 { minimum[bin][coordinate] } else { f64::MAX });
+                right_max[bin][coordinate] = right_max[bin + 1][coordinate]
+                    .max(if counts[bin] > 0 { maximum[bin][coordinate] } else { f64::MIN });
+            }
+        }
+
+        let mut left_counts = 0u32;
+        let mut left_min = [f64::MAX; 3];
+        let mut left_max = [f64::MIN; 3];
+        let mut best = f64::INFINITY;
+        let mut best_cut = None;
+        for cut in 0..BINS - 1 {
+            if counts[cut] == 0 {
+                continue;
+            }
+            left_counts += counts[cut];
+            for coordinate in 0..3 {
+                left_min[coordinate] = left_min[coordinate].min(minimum[cut][coordinate]);
+                left_max[coordinate] = left_max[coordinate].max(maximum[cut][coordinate]);
+            }
+            let right_count = right_counts[cut + 1];
+            if right_count == 0 {
+                continue;
+            }
+            // Costed as area x triangles for both children together, in the same units
+            // as the leaf comparison below. A child's area over the parent's is the
+            // chance a segment that reached the parent reaches it, so the sum estimates
+            // how many triangles a random segment will have to test.
+            let cost_unnormalised = area(left_min, left_max) * left_counts as f64
+                + area(right_min[cut + 1], right_max[cut + 1]) * right_count as f64;
+            if cost_unnormalised < best {
+                best = cost_unnormalised;
+                best_cut = Some((left_counts as usize,
+                    Aabb {
+                        min: left_min,
+                        max: left_max,
+                    },
+                    Aabb {
+                        min: right_min[cut + 1],
+                        max: right_max[cut + 1],
+                    },
+                ));
+            }
+        }
+
+        let (count, left, right) = match best_cut {
+            Some(best) => best,
+            None => return None,
+        };
+        // The same estimate for a leaf is the parent's area times every triangle in it:
+        // a segment that reaches the node then tests all of them. Splitting has to beat
+        // that, or the extra box tests would cost more than they save.
+        let leaf_cost = area(parent.min, parent.max) * range.len() as f64;
+        if best >= leaf_cost {
+            return None;
+        }
+        Some((count, left, right))
     }
 
-    /// Extent of the centroid cloud on `axis`; zero means every triangle in `range` shares
-    /// that centroid coordinate.
-    fn centroid_spread(&self, range: &std::ops::Range<usize>, axis: usize) -> f64 {
+    /// `low` and the bin width spanning this range's centroids on `axis`, or `None` if
+    /// they all coincide and no partition could separate them.
+    fn centroid_extent(&self, range: &std::ops::Range<usize>, axis: usize) -> Option<(f64, f64)> {
         let mut low = f64::MAX;
         let mut high = f64::MIN;
         for &triangle in &self.order[range.clone()] {
@@ -552,7 +653,17 @@ impl Builder {
             low = low.min(centre);
             high = high.max(centre);
         }
-        high - low
+        let span = high - low;
+        if span > 0.0 && span.is_finite() {
+            Some((low, span / BINS as f64))
+        } else {
+            None
+        }
+    }
+
+    fn make_leaf(&mut self, index: u32, range: std::ops::Range<usize>) {
+        self.nodes[index as usize].start = range.start as u32;
+        self.nodes[index as usize].count = (range.end - range.start) as u32;
     }
 
     fn merge(&self, range: std::ops::Range<usize>) -> Aabb {
@@ -584,71 +695,109 @@ fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
 }
 
 #[cfg(test)]
-mod tests {
+mod validity {
     use super::*;
 
-    /// The traversal depends on `move_mask` putting lane *i* in bit *i*, and on the vector
-    /// slab test agreeing with the scalar one lane for lane — including where a ray is
-    /// parallel to a slab and sits inside it, which produces infinities and NaNs.
-    #[test]
-    fn lane_masks_put_lane_i_in_bit_i() {
-        let lanes = f64x4::new([0.0, 1.0, 2.0, 3.0]);
-        assert_eq!(lanes.cmp_gt(0.5).move_mask(), 0b1110);
-        assert_eq!(lanes.cmp_gt(3.5).move_mask(), 0b0000);
-    }
-
-    /// The scalar slab test the vector one must match, kept here so the equivalence is
-    /// what is being proved rather than an accident of two call sites sharing code.
-    fn scalar_slab(min: [f64; 3], max: [f64; 3], origin: [f64; 3], inv_dir: [f64; 3]) -> bool {
-        let (mut entered, mut exited): (f64, f64) = (T_START, 1.0);
-        for axis in 0..3 {
-            let lo = (min[axis] - origin[axis]) * inv_dir[axis];
-            let hi = (max[axis] - origin[axis]) * inv_dir[axis];
-            let (lo, hi) = if lo > hi { (hi, lo) } else { (lo, hi) };
-            entered = entered.max(lo);
-            exited = exited.min(hi);
-            if entered > exited {
-                return false;
-            }
-        }
-        true
-    }
-
-    #[test]
-    fn vector_and_scalar_slab_tests_agree_including_degenerate_axes() {
-        let boxes = [
-            // ordinary crossings, misses, and a box the ray starts inside
-            ([1.0, -1.0, -1.0], [2.0, 1.0, 1.0]),
-            ([10.0, 10.0, 10.0], [11.0, 11.0, 11.0]),
-            ([-1.0, -1.0, -1.0], [1.0, 1.0, 1.0]),
-            // axis-aligned box sharing a plane with the origin: inv_dir * 0 → NaN bounds
-            ([0.0, 5.0, 5.0], [1.0, 6.0, 6.0]),
+    /// Floor plus an overhead octagon: enough triangles to split, few enough to read.
+    fn fixture() -> Geometry {
+        let mut positions = vec![
+            [-8.0, -8.0, 0.0],
+            [8.0, -8.0, 0.0],
+            [8.0, 8.0, 0.0],
+            [-8.0, 8.0, 0.0],
         ];
-        // Ray straight down +x from the origin.
-        let origin = [0.0, 0.0, 0.0];
-        let dir = [1.0, 0.0, 0.0];
-        let inv_dir = [1.0 / dir[0], 1.0 / dir[1], 1.0 / dir[2]];
+        let mut triangles = vec![[0u32, 1, 2], [0, 2, 3]];
+        let centre = positions.len() as u32;
+        positions.push([0.0, 0.0, 4.0]);
+        for step in 0..8 {
+            let a = positions.len() as u32;
+            let first = step as f64 * std::f64::consts::FRAC_PI_4;
+            positions.push([3.0 * first.cos(), 3.0 * first.sin(), 4.0]);
+            let second = a + 1;
+            positions.push([
+                3.0 * ((step + 1) as f64 * std::f64::consts::FRAC_PI_4).cos(),
+                3.0 * ((step + 1) as f64 * std::f64::consts::FRAC_PI_4).sin(),
+                4.0,
+            ]);
+            triangles.push([centre, a, second]);
+        }
+        let count = positions.len();
+        Geometry {
+            positions,
+            normals: vec![[0.0, 0.0, 1.0]; count],
+            triangles,
+        }
+    }
 
-        let mut bvh = Bvh::default();
-        for axis in 0..3 {
-            for (min, max) in &boxes {
-                bvh.bxmin[axis].push(min[axis]);
-                bvh.bxmax[axis].push(max[axis]);
+    fn triangle_box(geo: &Geometry, slot: &Slot) -> Aabb {
+        let mut box_ = Aabb::EMPTY;
+        for index in slot.verts {
+            box_ = box_.include(geo.positions[index as usize]);
+        }
+        box_
+    }
+
+    /// The invariant a hierarchy must hold for a box rejection to be sound: whatever a
+    /// node claims to cover contains every triangle below it, and every triangle below
+    /// it is claimed exactly once.
+    #[test]
+    fn every_triangle_sits_inside_every_box_above_it() {
+        let geo = fixture();
+        let bvh = Bvh::build(&geo);
+        let mut seen = vec![0usize; geo.triangles.len()];
+        let mut total = 0usize;
+        let mut stack = vec![(0usize, Aabb::EMPTY, true)];
+        while let Some((index, parent, is_root)) = stack.pop() {
+            let node = &bvh.nodes[index];
+            if !is_root {
+                for coordinate in 0..3 {
+                    assert!(
+                        node.bounds.min[coordinate] >= parent.min[coordinate] - 1e-9
+                            && node.bounds.max[coordinate] <= parent.max[coordinate] + 1e-9,
+                        "node {index} box {:?}..{:?} escapes its parent {:?}..{:?}",
+                        node.bounds.min,
+                        node.bounds.max,
+                        parent.min,
+                        parent.max
+                    );
+                }
+            }
+            if node.is_leaf() {
+                total += node.count as usize;
+                for slot in bvh.slots[node.start as usize..(node.start + node.count) as usize].iter()
+                {
+                    let box_ = triangle_box(&geo, slot);
+                    for coordinate in 0..3 {
+                        assert!(
+                            box_.min[coordinate] >= node.bounds.min[coordinate] - 1e-9
+                                && box_.max[coordinate] <= node.bounds.max[coordinate] + 1e-9,
+                            "triangle {:?} box {:?}..{:?} escapes leaf {index} box {:?}..{:?}",
+                            slot.verts,
+                            box_.min,
+                            box_.max,
+                            node.bounds.min,
+                            node.bounds.max
+                        );
+                    }
+                    let found = geo
+                        .triangles
+                        .iter()
+                        .position(|t| {
+                            t[0] == slot.verts[0]
+                                && t[1] == slot.verts[1]
+                                && t[2] == slot.verts[2]
+                        })
+                        .expect("slot is not a mesh triangle");
+                    seen[found] += 1;
+                }
+            } else {
+                stack.push((node.children[0] as usize, node.bounds, false));
+                stack.push((node.children[1] as usize, node.bounds, false));
             }
         }
-        // Pad to a whole group beyond the four boxes so a read at 0 covers them.
-        let want: Vec<bool> = boxes
-            .iter()
-            .map(|(min, max)| scalar_slab(*min, *max, origin, inv_dir))
-            .collect();
-
-        let mask = bvh.lane_mask_crossing(0, origin, inv_dir);
-        for (lane, expected) in want.iter().enumerate() {
-            let got = (mask >> lane) & 1 == 1;
-            assert_eq!(
-                got, *expected,
-                "lane {lane} disagrees with the scalar slab test"
-            );
+        assert_eq!(total, geo.triangles.len(), "each triangle in exactly one leaf");
+        for (index, count) in seen.iter().enumerate() {
+            assert_eq!(*count, 1, "triangle {index} appears {count} times");
         }
     }
 }

@@ -102,6 +102,23 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
         println!("wrote {}", image.display());
     }
 
+    #[cfg(feature = "count")]
+    {
+        use aomesh::bvh::counters as c;
+        use std::sync::atomic::Ordering::Relaxed;
+        let g = |s: &std::sync::atomic::AtomicU64| s.load(Relaxed) as f64;
+        let (rays, pops, crossed) = (g(&c::RAYS), g(&c::POPS), g(&c::BOXES_CROSSED));
+        let (leaves, tris, skip) = (g(&c::LEAVES), g(&c::TRIS), g(&c::SKIPPED_INCIDENT));
+        let (mt, hits) = (g(&c::MT), g(&c::HITS));
+        let per = |n: f64| if rays > 0.0 { n / rays } else { 0.0 };
+        eprintln!(
+            "rays {:.0} | pops/ray {:.2} (crossed {:.2}) | leaves/ray {:.2} | tris/ray {:.2} \
+             (incident-skip {:.2}, MT {:.2}) | blocked {:.1}%",
+            rays, per(pops), per(crossed), per(leaves), per(tris), per(skip), per(mt),
+            if rays > 0.0 { 100.0 * hits / rays } else { 0.0 },
+        );
+    }
+
     if !args.quiet {
         println!("done in {:.2}s", started.elapsed().as_secs_f64());
     }

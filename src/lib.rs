@@ -109,6 +109,13 @@ pub fn bake(
     destination: Option<&Path>,
     options: &BakeOptions,
 ) -> Result<BakeReport, BakeError> {
+    #[cfg(feature = "count")]
+    let mut clock = std::time::Instant::now();
+    #[cfg(feature = "count")]
+    let mut lap = |label: &str, clock: &mut std::time::Instant| {
+        eprintln!("{label:>12} {:6.1} ms", clock.elapsed().as_secs_f64() * 1e3);
+        *clock = std::time::Instant::now();
+    };
     let obj = objserde::parse_file(input).map_err(|source| BakeError::Parse {
         path: input.to_path_buf(),
         source,
@@ -120,7 +127,11 @@ pub fn bake(
         });
     }
 
+    #[cfg(feature = "count")]
+    lap("parse+bind", &mut clock);
     let visibility = ao::vertex_visibility(&geometry, options.samples);
+    #[cfg(feature = "count")]
+    lap("build+cast", &mut clock);
     let coordinates: Vec<f64> = visibility
         .iter()
         .map(|&value| texture::coordinate(value))
@@ -128,9 +139,13 @@ pub fn bake(
 
     let names = output::OutputNames::resolve(input, destination, &options.material_name);
     let baked = output::ao_obj(&obj, &coordinates, &names);
+    #[cfg(feature = "count")]
+    lap("format", &mut clock);
     write(&names.object, &output::obj_text(&baked))?;
     write(&names.material, &output::mtl_text(&names))?;
     write_ramp(&names.texture)?;
+    #[cfg(feature = "count")]
+    lap("write", &mut clock);
 
     Ok(BakeReport {
         vertices: obj.vertices.len(),
