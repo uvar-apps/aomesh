@@ -14,10 +14,48 @@
 //! * **A hit is scale-invariant.** Both the "ray parallel to the triangle" test
 //!   and the parametric hit range are ratios, so a mesh authored in microns and
 //!   one authored in kilometres report the same visibility.
+//! * **The answer does not depend on how the work was arranged.** A query asks whether
+//!   *any* triangle crosses the segment, so the tree may be shaped, packed, split and
+//!   threaded however it likes: see `the_parallel_build_and_the_serial_one_agree`, and
+//!   note that the outputs of every change below were byte-identical to the ones the
+//!   original median-split walk produced.
+//!
+//! # Where the time goes, and what was measured not to help
+//!
+//! On a 37,930-vertex, 75,852-triangle mesh at `-s 256` on an M4, a bake spends about 46 ms
+//! on fixed work and 205 ms in this walk. Almost all of the fixed work is objserde — 16 ms
+//! to parse the 5.3 MB input and 17 ms to format the 7.8 MB output — and the filesystem
+//! itself takes 1.4 ms. The `count` feature prints what a single segment reaches: 25 nodes,
+//! 14 triangles, 10.4 Möller–Trumbore tests, blocked 29.9% of the time.
+//!
+//! **Vector instructions do not pay on this workload, and three measurements say so.**
+//! Batching four triangles through one `f64x4` intersection measured 1.02–1.34x *slower*
+//! than the scalar loop it replaced: a shadow ray usually hits nothing, scalar code drops a
+//! miss after a couple of operations in that triangle's favour, and a lane has to finish the
+//! arithmetic regardless. Vectorising only the rejection filter — the one part of that batch
+//! that is branch-free — came in at parity, not a win. And the loop where SIMD plainly fits,
+//! a vertex's viewpoint weights, was measured by stubbing this walk out entirely: all of that
+//! arithmetic is 1.9 ms out of 207 ms of casting, so a perfect 4x on it would move the bake
+//! by 0.6%.
+//!
+//! Shrinking the node also lost twice for different reasons. Storing boxes as outward-rounded
+//! `f32` halves the bytes per visit and 32-byte nodes were measured at 1.17x over the
+//! original where the same code with 64-byte nodes reached 1.33x: the widening conversions
+//! and the lost per-axis early-out cost more than the fetched lines save.
+//!
+//! What paid, in rough order of size: the binned SAH split, eight triangles per leaf, testing
+//! a node's two children at their parent instead of pushing them blind, one packed record per
+//! triangle so a leaf reads sequentially instead of gathering corners from three unrelated
+//! addresses, and building the hierarchy across threads.
 
 use crate::geometry::Geometry;
 
-/// Temporary instrumentation: what one shadow ray actually walks.
+/// Per-query counters, behind the `count` feature, for measuring the walk.
+///
+/// `cargo build --release --features count` then `RAYON_NUM_THREADS=1 target/release/aomesh
+/// mesh.obj -s 64 --no-preview` prints, besides the phase times: how many segments were
+/// cast, how many nodes and triangles each reaches, and the share that turn out blocked.
+/// Every number quoted in this module's documentation came from here.
 #[cfg(feature = "count")]
 pub mod counters {
     use std::sync::atomic::{AtomicU64, Ordering};

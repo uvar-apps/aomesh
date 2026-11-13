@@ -112,7 +112,7 @@ pub fn bake(
     #[cfg(feature = "count")]
     let mut clock = std::time::Instant::now();
     #[cfg(feature = "count")]
-    let mut lap = |label: &str, clock: &mut std::time::Instant| {
+    let lap = |label: &str, clock: &mut std::time::Instant| {
         eprintln!("{label:>12} {:6.1} ms", clock.elapsed().as_secs_f64() * 1e3);
         *clock = std::time::Instant::now();
     };
@@ -141,22 +141,11 @@ pub fn bake(
     let baked = output::ao_obj(&obj, &coordinates, &names);
     #[cfg(feature = "count")]
     lap("format", &mut clock);
+    write(&names.object, &output::obj_text(&baked))?;
+    write(&names.material, &output::mtl_text(&names))?;
+    write_ramp(&names.texture)?;
     #[cfg(feature = "count")]
-    {
-        let text = output::obj_text(&baked);
-        lap("render obj", &mut clock);
-        write(&names.object, &text)?;
-        write(&names.material, &output::mtl_text(&names))?;
-        write_ramp(&names.texture)?;
-        lap("fs write", &mut clock);
-    }
-    #[cfg(not(feature = "count"))]
-    {
-        write(&names.object, &output::obj_text(&baked))?;
-        write(&names.material, &output::mtl_text(&names))?;
-        write_ramp(&names.texture)?;
-    }
-
+    lap("write", &mut clock);
     Ok(BakeReport {
         vertices: obj.vertices.len(),
         triangles: geometry.triangles.len(),
