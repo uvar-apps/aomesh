@@ -8,6 +8,9 @@ license = "MIT OR Apache-2.0"
 keywords = ["obj", "ambient-occlusion", "mesh", "bake", "3d"]
 categories = ["graphics", "command-line-utilities"]
 
+[features]
+count = []
+
 [dependencies]
 objserde = "0.2"
 # Used only as a rasterizer for the validation image. It never reads or writes an

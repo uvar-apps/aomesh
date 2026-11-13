@@ -84,10 +84,12 @@ and denominator are weighted the same way, so seeing everything still lands on e
 **Casting.** A vertex is *seen* from a viewpoint when the segment between them crosses no
 triangle. Every segment is answered by a bounding-volume hierarchy built over the
 mesh's triangles, so cost is `vertices × samples × log(triangles)` rather than the naive
-product of all three; vertices are independent and are distributed over rayon. On a real
-75 852-triangle mesh (a molecular surface, 37 930 vertices, 256 viewpoints — some 4.8
-million of them in front of a surface) a whole run measures about 0.9 s: parse, hierarchy,
-rays and outputs.
+product of all three; vertices are independent and are distributed over rayon. The
+hierarchy splits its nodes where a binned surface-area heuristic says a segment is least
+likely to reach, holds eight triangles per leaf, and keeps each triangle's corners and
+edges in one packed record so a leaf reads sequentially. On a real 75 852-triangle mesh (a
+molecular surface, 37 930 vertices, 256 viewpoints — some 4.8 million of them in front of a
+surface) a whole run measures about 0.25 s: parse, hierarchy, rays and outputs.
 
 Two details decide whether the numbers mean anything. A triangle that references the very
 vertex being tested is skipped: the vertex sits *on* the surface, so without this every
@@ -128,6 +130,54 @@ which puts visibility 0 at the centre of texel 0 (black) and 1 at the centre of 
 `vt u` is legal Wavefront, but samplers key off an (s, t) pair, and against a texture one
 pixel tall the second component is ignored anyway.
 
+## Performance
+
+Measured on an Apple M4 (4 performance and 6 efficiency cores), comparing this branch
+against `v0.1.0` with both binaries built in the same session and run alternately in the
+same directory, so neither side gets a warmer machine. Every output — OBJ, MTL and PNG —
+came out **byte-identical**, because none of this changes which triangle a segment hits:
+
+| mesh | `-s` | ten cores | one core |
+| --- | --- | --- | --- |
+| molecular surface, 37 930 v / 75 852 t | 256 | 308 ms → 250 ms (**1.23×**) | 1931 ms → 1457 ms (**1.33×**) |
+| same mesh | 1024 | 999 ms → 817 ms (**1.22×**) | — |
+| same mesh | 16 | 67 ms → 59 ms (**1.13×**) | — |
+| `torus.obj` | 256 | 6.8 ms → 6.5 ms (**1.05×**) | 25.1 ms → 21.2 ms (**1.19×**) |
+| `corner.obj` | 256 | 4.8 ms → 4.8 ms (**1.01×**) | 9.6 ms → 8.0 ms (**1.21×**) |
+| `stacks.obj` | 256 | 3.9 ms → 3.9 ms | 5.4 ms → 5.2 ms (**1.04×**) |
+
+Where those milliseconds are, on the big mesh at `-s 256`: about 46 ms of fixed work —
+16 ms for objserde to parse the 5.3 MB input, 17 ms to format the 7.8 MB output, 4 ms to
+build the hierarchy, 1.4 ms for the filesystem — and about 205 ms inside the hierarchy. One
+segment reaches 25 nodes, 14 triangles, 10.4 intersection tests, and turns out blocked 29.9%
+of the time. `cargo build --release --features count` prints all of it.
+
+Four things produced the gain, in rough order of size: the surface-area split, testing a
+node's two children at their parent rather than pushing them blind, eight triangles per leaf,
+and one packed record per triangle instead of re-gathering its corners from
+`positions` on every test. Building the hierarchy across threads took it from 10.8 ms to
+4.0 ms, which is most of what the fixed cost leaves available here — the rest of that 46 ms
+belongs to objserde, in a mesh's own parse and format.
+
+**What does not help, measured rather than assumed.** Vector instructions. Batching four
+triangles through one `f64x4` Möller–Trumbore test came in 1.02–1.34× *slower* than the
+scalar loop it replaced; vectorising only the box-rejection filter reached parity. The reason
+is in the numbers above: a shadow ray usually hits nothing, and scalar code abandons a miss
+after two or three operations in that triangle's favour, while a lane has to finish the
+arithmetic. Widening the *viewpoint weights* — the one loop that is pure streaming
+arithmetic, exactly what SIMD wants — cannot matter either: with the hierarchy stubbed out,
+all of that arithmetic is 1.9 ms of 207 ms, so a perfect 4× on it would move a bake by 0.6%.
+Storing node boxes as outward-rounded `f32`, which halves the bytes per visit, also lost
+(1.17× where the 64-byte nodes reached 1.33×): no `target-cpu` flag and no ISA assumption
+would have made that one work either.
+
+**Portability.** Nothing here is architecture-specific: no `target-feature` attributes, no
+runtime dispatch, no intrinsics — the code is the same on every target Rust builds for, and
+rayon sized the thread pool to the cores actually available (`RAYON_NUM_THREADS` still
+overrides it). The hierarchy's shape does not depend on scheduling: `fill`, `build` and the
+shipped grain are asserted to produce identical nodes in identical order, so a bake on one
+core matches a bake on eighty, byte for byte.
+
 ## Verification
 
 ```sh
@@ -164,6 +214,18 @@ beats a hand figure that happens to land nearby.
 An exact 1.0 across a convex cube is also the regression test for the failure this tool was
 once guilty of: counting viewpoints a surface cannot address parks every face at half
 brightness and leaves a bake with no white anywhere in it.
+
+Two structural tests guard the hierarchy itself, because everything fast here is a decision
+about how to arrange it, and an arrangement is only legal if it preserves the answer.
+`every_triangle_sits_inside_every_box_above_it` walks a finished tree and asserts that each
+node's box covers every triangle below it and that each triangle appears in exactly one
+leaf — the invariant a box rejection depends on. It was written against a real break: a
+suffix sweep in the split heuristic that handed a child a box covering one bin instead of
+everything to its right. A sealed cavity still read black and a floor still read white; the
+disk fixture, whose value is a closed form, is what failed.
+`the_parallel_build_and_the_serial_one_agree` builds the same mesh three ways — one shared
+node vector, a `rayon::join` at every level, and the shipped grain — and compares the nodes
+one by one, so thread scheduling cannot quietly become part of an output.
 
 Beyond that the suite covers the written files (one `vt` per vertex, corners kept as
 `v/vt/vn`, `vt` arity, relative references in the MTL, the ramp's exact pixel values), the
