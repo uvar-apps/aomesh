@@ -70,7 +70,7 @@ const PARALLEL_EPS2: f64 = 1e-24;
 /// ray started on, not an occluder.
 const T_START: f64 = 1e-9;
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 struct Aabb {
     min: [f64; 3],
     max: [f64; 3],
@@ -166,7 +166,7 @@ impl Aabb {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 struct Node {
     bounds: Aabb,
     /// Child node indices; meaningless on a leaf.
@@ -195,7 +195,7 @@ impl Node {
 ///
 /// The values are the same ones the gathers produced — `e1` is `positions[b] -
 /// positions[a]` wherever it is computed — so no intersection decision changes.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 struct Slot {
     p0: [f64; 3],
     e1: [f64; 3],
@@ -238,6 +238,7 @@ impl Bvh {
         let mut order: Vec<u32> = (0..geo.triangles.len() as u32).collect();
         let plan = Plan {
             measured: &measured,
+            grain: PARALLEL_GRAIN,
         };
         let root_box = merge(&order, &plan);
         let nodes = build(&mut order, 0, 0, root_box, &plan);
@@ -440,9 +441,11 @@ struct Measure {
     centroid: [f64; 3],
 }
 
-/// Read-only inputs every subtree shares.
+/// What the build shares with every subtree: the triangles' measures, and the grain below
+/// which it stops handing work to the pool.
 struct Plan<'a> {
     measured: &'a [Measure],
+    grain: usize,
 }
 
 /// One box and centroid per triangle, in file order.
@@ -484,7 +487,13 @@ const PARALLEL_GRAIN: usize = 4096;
 /// relative to that vector, so a subtree can be spliced anywhere by shifting its links.
 fn build(order: &mut [u32], base: usize, depth: usize, box_: Aabb, plan: &Plan<'_>) -> Vec<Node> {
     let mut nodes = Vec::new();
-    if order.len() < PARALLEL_GRAIN {
+    // Whether this node is a leaf is the tree's question, not the scheduler's, so the same
+    // three tests gate both paths: too few triangles to split, or the depth the traversal's
+    // stack is sized for, or too small a range to be worth a handover. `fill` applies the
+    // first two again on the way down; a `build` that divided past `MAX_DEPTH` would grow a
+    // tree deeper than the walk has room to descend, and one that divided a node the heuristic
+    // would keep would not be the same hierarchy.
+    if order.len() <= LEAF_SIZE || depth >= MAX_DEPTH || order.len() < plan.grain {
         fill(order, base, depth, box_, plan, &mut nodes);
         return nodes;
     }
@@ -884,5 +893,78 @@ mod validity {
         for (index, count) in seen.iter().enumerate() {
             assert_eq!(*count, 1, "triangle {index} appears {count} times");
         }
+    }
+}
+
+#[cfg(test)]
+mod build_equivalence {
+    use super::*;
+
+    /// A closed `side × side` grid of quads, wrinkled so the heuristic has real work to do.
+    fn grid(side: usize) -> Geometry {
+        let mut positions = Vec::with_capacity((side + 1) * (side + 1));
+        for y in 0..=side {
+            for x in 0..=side {
+                positions.push([x as f64, y as f64, ((x * y) % 7) as f64 * 0.25]);
+            }
+        }
+        let row = side + 1;
+        let mut triangles = Vec::with_capacity(2 * side * side);
+        for y in 0..side {
+            for x in 0..side {
+                let a = (y * row + x) as u32;
+                triangles.push([a, a + 1, a + row as u32]);
+                triangles.push([a + 1, a + row as u32 + 1, a + row as u32]);
+            }
+        }
+        let vertices = positions.len();
+        Geometry {
+            positions,
+            normals: vec![[0.0, 0.0, 1.0]; vertices],
+            triangles,
+        }
+    }
+
+    /// One build with the grain pinned, so the two code paths can be compared directly.
+    fn with_grain(geo: &Geometry, grain: usize) -> Bvh {
+        let measured = measure(geo);
+        let mut order: Vec<u32> = (0..geo.triangles.len() as u32).collect();
+        let plan = Plan {
+            measured: &measured,
+            grain,
+        };
+        let root_box = merge(&order, &plan);
+        let nodes = build(&mut order, 0, 0, root_box, &plan);
+        Bvh {
+            nodes: pack_siblings(nodes, 0),
+            slots: reorder(geo, &order),
+            bounds: root_box,
+        }
+    }
+
+    /// The grain and the depth cap are scheduling decisions, not part of the answer: a bake
+    /// must not depend on how many cores were free while its hierarchy was being built. So
+    /// building every subtree in one shared vector (`fill`) and joining at every level
+    /// (`build`) have to yield the same nodes, the same spans, and the same hierarchy.
+    #[test]
+    fn the_parallel_build_and_the_serial_one_agree() {
+        let geo = grid(96);
+        assert!(
+            geo.triangles.len() > 4 * PARALLEL_GRAIN,
+            "the fixture has to be big enough to divide both ways"
+        );
+        let shared = with_grain(&geo, usize::MAX);
+        let divided = with_grain(&geo, 1);
+        let shipped = Bvh::build(&geo);
+
+        assert_eq!(shared.nodes.len(), divided.nodes.len(), "same node count");
+        for (index, (a, b)) in shared.nodes.iter().zip(divided.nodes.iter()).enumerate() {
+            assert_eq!(a, b, "node {index} differs between the two builds");
+        }
+        assert_eq!(
+            shared.slots, divided.slots,
+            "same triangles in the same order"
+        );
+        assert_eq!(shipped.nodes, shared.nodes, "and the shipped grain agrees");
     }
 }
