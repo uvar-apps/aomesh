@@ -125,7 +125,7 @@ pub fn vertex_visibility(geo: &Geometry, samples: usize) -> Vec<f64> {
                     continue;
                 }
                 total += cos;
-                if !bvh.segment_blocked(geo, from, to, index as u32) {
+                if !bvh.segment_blocked(from, to, index as u32) {
                     seen += cos;
                 }
             }
