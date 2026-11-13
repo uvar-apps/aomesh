@@ -29,12 +29,20 @@ pub mod counters {
     pub static SKIPPED_INCIDENT: AtomicU64 = AtomicU64::new(0);
     pub static MT: AtomicU64 = AtomicU64::new(0);
     pub static HITS: AtomicU64 = AtomicU64::new(0);
-    pub fn add(slot: &AtomicU64, n: u64) { slot.fetch_add(n, Ordering::Relaxed); }
+    pub fn add(slot: &AtomicU64, n: u64) {
+        slot.fetch_add(n, Ordering::Relaxed);
+    }
 }
 
-/// Triangles per leaf. Below this the traversal costs more than the brute-force
-/// test it replaces.
-const LEAF_SIZE: usize = 4;
+/// Triangles in a leaf.
+///
+/// Chosen by measurement, not by taste: on a 76k-triangle mesh, eight reaches the same
+/// triangles through a third fewer nodes than four and runs 3–6% faster, while the two
+/// small sample meshes lose about 2% because their walks are short enough that the extra
+/// triangle tests in a fat leaf cost more than the descent they skip. Sixteen is worse
+/// than eight on both. The heuristic's own stop test (`Builder::bin`) can still leave a
+/// node with fewer than this, and does wherever splitting cannot pay for itself.
+const LEAF_SIZE: usize = 8;
 
 /// Partition candidates per node in the surface-area-heuristic scan.
 ///
@@ -509,14 +517,14 @@ impl Builder {
         // Move the cheapest cut's triangles to the front by rank: `left_count` is the
         // number of triangles in the bins at or below the cut, so ordering by bin index
         // and stopping there puts exactly those in the left child.
-        let Builder {
-            order, bins, ..
-        } = self;
-        order[range.clone()].select_nth_unstable_by(left_count, |a, b| {
-            bins[*a as usize].cmp(&bins[*b as usize])
-        });
+        let Builder { order, bins, .. } = self;
+        order[range.clone()]
+            .select_nth_unstable_by(left_count, |a, b| bins[*a as usize].cmp(&bins[*b as usize]));
         let pivot = range.start + left_count;
-        debug_assert!(left_count > 0 && left_count < range.len(), "split makes progress");
+        debug_assert!(
+            left_count > 0 && left_count < range.len(),
+            "split makes progress"
+        );
 
         let left_child = self.split(range.start..pivot, depth + 1, left);
         let right_child = self.split(pivot..range.end, depth + 1, right);
@@ -583,10 +591,18 @@ impl Builder {
         for bin in (0..BINS).rev() {
             right_counts[bin] = right_counts[bin + 1] + counts[bin];
             for coordinate in 0..3 {
-                right_min[bin][coordinate] = right_min[bin + 1][coordinate]
-                    .min(if counts[bin] > 0 { minimum[bin][coordinate] } else { f64::MAX });
-                right_max[bin][coordinate] = right_max[bin + 1][coordinate]
-                    .max(if counts[bin] > 0 { maximum[bin][coordinate] } else { f64::MIN });
+                right_min[bin][coordinate] =
+                    right_min[bin + 1][coordinate].min(if counts[bin] > 0 {
+                        minimum[bin][coordinate]
+                    } else {
+                        f64::MAX
+                    });
+                right_max[bin][coordinate] =
+                    right_max[bin + 1][coordinate].max(if counts[bin] > 0 {
+                        maximum[bin][coordinate]
+                    } else {
+                        f64::MIN
+                    });
             }
         }
 
@@ -616,7 +632,8 @@ impl Builder {
                 + area(right_min[cut + 1], right_max[cut + 1]) * right_count as f64;
             if cost_unnormalised < best {
                 best = cost_unnormalised;
-                best_cut = Some((left_counts as usize,
+                best_cut = Some((
+                    left_counts as usize,
                     Aabb {
                         min: left_min,
                         max: left_max,
@@ -764,7 +781,8 @@ mod validity {
             }
             if node.is_leaf() {
                 total += node.count as usize;
-                for slot in bvh.slots[node.start as usize..(node.start + node.count) as usize].iter()
+                for slot in
+                    bvh.slots[node.start as usize..(node.start + node.count) as usize].iter()
                 {
                     let box_ = triangle_box(&geo, slot);
                     for coordinate in 0..3 {
@@ -783,9 +801,7 @@ mod validity {
                         .triangles
                         .iter()
                         .position(|t| {
-                            t[0] == slot.verts[0]
-                                && t[1] == slot.verts[1]
-                                && t[2] == slot.verts[2]
+                            t[0] == slot.verts[0] && t[1] == slot.verts[1] && t[2] == slot.verts[2]
                         })
                         .expect("slot is not a mesh triangle");
                     seen[found] += 1;
@@ -795,7 +811,11 @@ mod validity {
                 stack.push((node.children[1] as usize, node.bounds, false));
             }
         }
-        assert_eq!(total, geo.triangles.len(), "each triangle in exactly one leaf");
+        assert_eq!(
+            total,
+            geo.triangles.len(),
+            "each triangle in exactly one leaf"
+        );
         for (index, count) in seen.iter().enumerate() {
             assert_eq!(*count, 1, "triangle {index} appears {count} times");
         }

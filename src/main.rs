@@ -114,7 +114,13 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
         eprintln!(
             "rays {:.0} | pops/ray {:.2} (crossed {:.2}) | leaves/ray {:.2} | tris/ray {:.2} \
              (incident-skip {:.2}, MT {:.2}) | blocked {:.1}%",
-            rays, per(pops), per(crossed), per(leaves), per(tris), per(skip), per(mt),
+            rays,
+            per(pops),
+            per(crossed),
+            per(leaves),
+            per(tris),
+            per(skip),
+            per(mt),
             if rays > 0.0 { 100.0 * hits / rays } else { 0.0 },
         );
     }

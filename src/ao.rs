@@ -102,7 +102,11 @@ pub fn vertex_visibility(geo: &Geometry, samples: usize) -> Vec<f64> {
     let built = std::time::Instant::now();
     let bvh = Bvh::build(geo);
     #[cfg(feature = "count")]
-    eprintln!("{:>12} {:6.1} ms", "bvh build", built.elapsed().as_secs_f64() * 1e3);
+    eprintln!(
+        "{:>12} {:6.1} ms",
+        "bvh build",
+        built.elapsed().as_secs_f64() * 1e3
+    );
 
     // The sphere is one sphere about the whole mesh, not a per-vertex cone — what a
     // vertex can see is measured from where that vertex stands, toward viewpoints that
