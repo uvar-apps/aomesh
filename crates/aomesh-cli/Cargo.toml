@@ -1,0 +1,43 @@
+[package]
+name = "aomesh-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "README.md"
+# Deliberately identical to the library's: clap reads this string for the program's
+# `about` line, so it is part of `--help` output, not prose to reword per package.
+description = "Per-vertex ambient occlusion baked into 1D texture coordinates and a 256x1 grayscale texture"
+keywords = ["obj", "ambient-occlusion", "mesh", "bake", "cli"]
+categories = ["command-line-utilities", "graphics"]
+
+[[bin]]
+name = "aomesh"
+path = "src/main.rs"
+# The program is `aomesh`, and rustdoc would otherwise write its page over the
+# library's at target/doc/aomesh/index.html (rust-lang/cargo#6313). A binary's `main`
+# is not a crate anyone links against; documentation lives in the library and here:
+# `aomesh --help`.
+doc = false
+
+[features]
+# Forwards to the library: the traversal counters this prints live there.
+count = ["aomesh/count"]
+
+[dependencies]
+aomesh.workspace = true
+clap.workspace = true
+# The validation image, which is the tool's own check rather than part of a bake: this
+# is the one package that draws, so this is the only manifest with a rasterizer in it.
+meshview.workspace = true
+# The renderer assembles both panels from an objserde model — meshview is never asked
+# to read an OBJ — and the error type below carries objserde's own parse failure.
+objserde.workspace = true
+thiserror.workspace = true
+
+# The tests decode the PNG the tool writes.
+[dev-dependencies]
+tempfile.workspace = true
+image.workspace = true

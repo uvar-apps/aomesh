@@ -5,6 +5,12 @@
 //! not parse anything here: both panels are assembled from an objserde model, so
 //! the OBJ and MTL readers in this crate are objserde alone.
 //!
+//! This is the only place in the workspace with a rasterizer, deliberately: drawing a
+//! picture for a human to eyeball is a property of the tool, not of a bake, and
+//! meshview carries `clap` and some twenty crates with it. The library stays free of
+//! both, so a program that links `aomesh` to occlude a mesh pays for geometry and rays
+//! only.
+//!
 //! The sheet puts the source mesh and the baked mesh side by side under **one**
 //! shared orthographic camera. A pixel difference between the panels can then only
 //! mean a *shading* difference: same scale, same orientation, same silhouette.

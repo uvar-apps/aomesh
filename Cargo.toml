@@ -1,36 +1,27 @@
-[package]
-name = "aomesh"
-version = "0.2.0"
+[workspace]
+resolver = "2"
+members = ["crates/aomesh", "crates/aomesh-cli"]
+default-members = ["crates/aomesh", "crates/aomesh-cli"]
+
+[workspace.package]
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.85"
-description = "Per-vertex ambient occlusion baked into 1D texture coordinates and a 256x1 grayscale texture"
 authors = ["Ugo Garetto"]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/uvar-apps/aomesh"
-readme = "README.md"
-keywords = ["obj", "ambient-occlusion", "mesh", "bake", "3d"]
-categories = ["graphics", "command-line-utilities"]
 
-[features]
-count = []
-
-[dependencies]
+[workspace.dependencies]
+aomesh = { version = "0.3.0", path = "crates/aomesh" }
 objserde = "0.2"
 # Used only as a rasterizer for the validation image. It never reads or writes an
 # OBJ here: the mesh it draws is assembled from the objserde model.
 meshview = "0.3"
-clap = { version = "4", features = ["derive"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
 rayon = "1"
 thiserror = "2"
-
-[dev-dependencies]
+clap = { version = "4", features = ["derive"] }
 tempfile = "3"
-# Integration tests read the generated OBJ/MTL back with the same reader the tool
-# uses, and check the render input meshview expects.
-objserde = "0.2"
-meshview = "0.3"
-image = { version = "0.25", default-features = false, features = ["png"] }
 
 [profile.release]
 lto = true

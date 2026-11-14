@@ -52,6 +52,19 @@ pub fn write_png(image: &GrayImage, path: &Path) -> std::io::Result<()> {
 /// ```
 ///
 /// Since texel *k* stores the value *k*, the sampled result is `255 · visibility`.
+///
+/// ```
+/// use aomesh::texture::coordinate;
+///
+/// // Each endpoint lands on a texel centre, read back as `fract(u) · 256 − 0.5`.
+/// assert_eq!(coordinate(0.0) * 256.0 - 0.5, 0.0, "texel 0: black, fully occluded");
+/// assert_eq!(coordinate(1.0) * 256.0 - 0.5, 255.0, "texel 255: white, fully open");
+/// // Which is the point: passed through unchanged, 0.0 and 1.0 are the same seam.
+/// assert_ne!(coordinate(0.0), coordinate(1.0));
+/// // Outside the range a visibility cannot go, clamped rather than wrapped.
+/// assert_eq!(coordinate(-0.5), coordinate(0.0));
+/// assert_eq!(coordinate(1.5), coordinate(1.0));
+/// ```
 #[must_use]
 pub fn coordinate(visibility: f64) -> f64 {
     let clamped = visibility.clamp(0.0, 1.0);
@@ -60,6 +73,14 @@ pub fn coordinate(visibility: f64) -> f64 {
 
 /// The texture level a visibility rounds to. Used only for reporting; the written
 /// coordinate keeps full precision.
+///
+/// ```
+/// use aomesh::texture::level;
+///
+/// assert_eq!(level(0.0), 0);
+/// assert_eq!(level(1.0), 255);
+/// assert_eq!(level(0.5), 128, "half of 255 is 127.5, and it rounds away from black");
+/// ```
 #[must_use]
 pub fn level(visibility: f64) -> u8 {
     let clamped = visibility.clamp(0.0, 1.0);

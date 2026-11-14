@@ -4,51 +4,9 @@
 //! wiring is product surface too — a default that overwrites the input, or
 //! `--samples 0` dividing by zero, is a bug no library test would notice.
 
-use std::path::Path;
-use std::process::Command;
+mod common;
 
-const BINARY: &str = env!("CARGO_BIN_EXE_aomesh");
-
-/// The unit cube: eight convex corners with nothing near them, so every vertex must
-/// bake pure white. The white-is-reachable end of the range, checked through the
-/// binary; see `ao_values.rs` for the rest.
-const CUBE: &str = "\
-v 0 0 0
-v 1 0 0
-v 1 1 0
-v 0 1 0
-v 0 0 1
-v 1 0 1
-v 1 1 1
-v 0 1 1
-f 1 4 3 2
-f 5 6 7 8
-f 1 2 6 5
-f 3 4 8 7
-f 1 5 8 4
-f 2 3 7 6
-";
-
-fn sample(directory: &Path) -> std::path::PathBuf {
-    let path = directory.join("cube.obj");
-    std::fs::write(&path, CUBE).expect("fixture writes");
-    path
-}
-
-fn invoke(args: &[&str]) -> std::process::Output {
-    Command::new(BINARY)
-        .args(args)
-        .output()
-        .expect("the binary runs")
-}
-
-fn stdout(output: &std::process::Output) -> String {
-    String::from_utf8_lossy(&output.stdout).into_owned()
-}
-
-fn stderr(output: &std::process::Output) -> String {
-    String::from_utf8_lossy(&output.stderr).into_owned()
-}
+use common::{invoke, sample, stderr, stdout};
 
 /// The three numbers on the `visibility  min …  mean …  max …` summary line.
 fn reported_visibility(text: &str) -> Vec<f64> {
