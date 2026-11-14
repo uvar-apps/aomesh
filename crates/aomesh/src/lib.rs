@@ -87,6 +87,17 @@
 //!   quality metric. [`geometry::Geometry::from_obj`] turns an objserde model into what
 //!   that function measures, and nothing about it requires a file.
 //!
+//! # Runnable examples
+//!
+//! Three self-checking programs in `examples/`, each one a shape of call rather than a
+//! fragment — `cargo run -p aomesh --example <name>`, and `cargo test` compiles all three:
+//!
+//! - `bake_a_mesh` — the one-call bake, with an optional mesh path argument.
+//! - `visibility_values` — the numbers alone, no files: a floor measured with and
+//!   without two walls stood near it.
+//! - `custom_output` — destination and material name, then the result read back with
+//!   objserde to show what a renderer will actually see.
+//!
 //! # Cost
 //!
 //! Work is linear in [`BakeOptions::samples`] — every vertex tests the same sphere of
