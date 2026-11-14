@@ -4,7 +4,10 @@ version = "0.2.0"
 edition = "2024"
 rust-version = "1.85"
 description = "Per-vertex ambient occlusion baked into 1D texture coordinates and a 256x1 grayscale texture"
+authors = ["Ugo Garetto"]
 license = "MIT OR Apache-2.0"
+repository = "https://github.com/uvar-apps/aomesh"
+readme = "README.md"
 keywords = ["obj", "ambient-occlusion", "mesh", "bake", "3d"]
 categories = ["graphics", "command-line-utilities"]
 

@@ -20,6 +20,13 @@ carries its own darkening forever, resolution-independently.
 ## Build and run
 
 ```sh
+cargo install aomesh
+aomesh assets/torus.obj
+```
+
+From a checkout instead:
+
+```sh
 cargo build --release
 ./target/release/aomesh assets/torus.obj
 ```
