@@ -19,17 +19,52 @@ carries its own darkening forever, resolution-independently.
 
 ## Build and run
 
+The program:
+
 ```sh
-cargo install aomesh
-aomesh assets/torus.obj
+cargo install aomesh-cli
+aomesh path/to/mesh.obj
 ```
 
-From a checkout instead:
+The library, for a program of your own:
 
 ```sh
-cargo build --release
+cargo add aomesh
+```
+
+```rust
+use aomesh::{BakeOptions, bake};
+
+let report = bake("seat.obj".as_ref(), None, &BakeOptions::default())?;
+println!("{} → {}", report.object.display(), report.texture.display());
+```
+
+From a checkout, at the repository root — which comes with three sample meshes under
+`assets/`, described at the bottom of this file:
+
+```sh
+cargo build --release          # builds both members
 ./target/release/aomesh assets/torus.obj
 ```
+
+### What is where
+
+| path | package | what it is |
+| --- | --- | --- |
+| `crates/aomesh` | `aomesh` | the library: bake an OBJ, or take the per-vertex values with nothing written |
+| `crates/aomesh-cli` | `aomesh-cli` | the program described here, which is that library plus flags and a validation image |
+
+Two packages, one workspace, one `Cargo.lock`, one version shared through
+`[workspace.package]`. The library has no rasterizer and no argument parser: it depends on
+objserde, `image`, rayon and thiserror. The CLI is the only member that draws, so it is the
+only member carrying meshview.
+
+> **From 0.2.0.** The program moved. `cargo install aomesh` installs a library, which is
+> what it always was for anyone linking it, and no longer puts an `aomesh` binary on your
+> path; the command is now `cargo install aomesh-cli`. That move is the 0.3.0 minor bump —
+> no computed value changed, and [Performance](#performance) has the byte-by-byte proof
+> against `v0.2.0`. (0.2.0's own minor bump was for `Bvh::segment_blocked` losing a
+> parameter, for the same reason: a library surface change, not a behaviour change.)
 
 A run leaves four files next to the mesh it read, and never modifies that mesh:
 
@@ -40,21 +75,9 @@ torus_ao.png        the ramp: 256 pixels wide, 1 tall, 0 … 255
 torus_ao_preview.png  source and bake side by side, one shared camera
 ```
 
-```
-Usage: aomesh [OPTIONS] <INPUT>
-
-Arguments:
-  <INPUT>  Wavefront OBJ to bake. Left untouched; outputs are new files
-
-Options:
-  -o, --output <OUTPUT>          Destination OBJ (default: input name + `_ao`)
-  -s, --samples <SAMPLES>        Viewpoints on the sphere (each vertex tests the ~half in
-                                 front of its normal) [default: 256]
-      --material <MATERIAL>      `newmtl` name [default: aomesh_ao]
-      --preview-size <SIZE>      Panel edge in pixels [default: 620]
-      --no-preview               Skip the validation image
-  -q, --quiet                    Report only the files written
-```
+`aomesh --help` lists the flags;
+[`crates/aomesh-cli/README.md`](crates/aomesh-cli/README.md) explains each one and what the
+report lines mean.
 
 To look at a bake, open `torus_ao.obj` in any OBJ viewer that resolves `map_Kd`. The
 preview sheet needs no viewer: the left panel is the source mesh and the right is the
@@ -114,8 +137,10 @@ carry occlusion.
 
 Writing goes through objserde's structural mode (`Obj`'s `Display`) rather than its
 `write_mesh`: the latter normalizes faces to `f a//a b//b c//c` and cannot express a `vt`
-at all, which is to say it cannot express an AO bake. All OBJ and MTL reading and writing
-in this crate is objserde's; meshview is only ever handed geometry to rasterize.
+at all, which is to say it cannot express an AO bake. All OBJ and MTL reading and writing in
+this workspace is objserde's. meshview is only ever handed geometry to rasterize, and it
+appears in one member — the CLI — plus the library's dev-dependencies, where tests use it as
+a second, independent reader of what objserde wrote.
 
 ### Why the coordinate is not just the visibility value
 
@@ -132,7 +157,7 @@ u = (0.5 + 255 · visibility) / 256
 which puts visibility 0 at the centre of texel 0 (black) and 1 at the centre of texel 255
 (white). Because the ramp stores the value *k* in texel *k*, a sample returns exactly
 `255 · visibility`; the deviation costs nothing that survives the texture's own 8 bits.
-`tests/pipeline.rs` demonstrates the aliasing and the fix, so this cannot be
+`crates/aomesh/tests/pipeline.rs` demonstrates the aliasing and the fix, so this cannot be
 "optimised" back into a bug unnoticed. A `vt` also carries two components rather than one:
 `vt u` is legal Wavefront, but samplers key off an (s, t) pair, and against a texture one
 pixel tall the second component is ignored anyway.
@@ -185,10 +210,29 @@ overrides it). The hierarchy's shape does not depend on scheduling: `fill`, `bui
 shipped grain are asserted to produce identical nodes in identical order, so a bake on one
 core matches a bake on eighty, byte for byte.
 
+### 0.3.0: the split, measured to be nothing
+
+Version 0.3.0 moved the program into its own package and the rasterizer with it, which is
+the sort of change that should not alter a single byte — so that is what was checked, rather
+than asserted. Against `v0.2.0` built from its tag in the same session, thirteen invocations
+(three sample meshes plus a 37 930-vertex molecular surface, at `-s 16 / 64 / 256 / 1024`,
+with `--no-preview`, `-q`, `--material`, `-o`, and `--preview-size`) produced **51 files, all
+hashing identically**, stdout included apart from the elapsed-time line. Both binaries ran in
+the *same* directory path for each case, because the MTL names its output in a header comment
+and two identical builds in different directories would look different. `-h`, `--help` and six
+error paths — missing input, no faces, unparseable OBJ, `-s 0`, unknown flag, no arguments —
+match byte for byte, exit codes included.
+
+That is the same instrument that caught the two real bugs during the performance work, which
+is why it is the gate here and not a note that the tests were green: the closed-form fixtures
+pass for a bake that is quietly wrong.
+
 ## Verification
 
 ```sh
-cargo test
+cargo test --workspace     # 29 tests, 9 doctests; also compiles the 3 examples
+cargo clippy --workspace --all-targets
+cargo fmt --all --check
 ```
 
 The interesting tests are the ones that do not compare the implementation against itself,
@@ -234,10 +278,13 @@ disk fixture, whose value is a closed form, is what failed.
 node vector, a `rayon::join` at every level, and the shipped grain — and compares the nodes
 one by one, so thread scheduling cannot quietly become part of an output.
 
-Beyond that the suite covers the written files (one `vt` per vertex, corners kept as
-`v/vt/vn`, `vt` arity, relative references in the MTL, the ramp's exact pixel values), the
-sampler round-trip, scale invariance, bit-for-bit reproducibility, the error paths, and the
-flag handling and exit codes of the binary.
+Beyond that the library's suite covers the written files (one `vt` per vertex, corners kept
+as `v/vt/vn`, `vt` arity, relative references in the MTL, the ramp's exact pixel values), the
+sampler round-trip, scale invariance, bit-for-bit reproducibility and the error taxonomy —
+and its nine doctests run rather than merely compile, each asserting a claim the prose makes.
+The CLI's suite covers what only a program has: flag handling, exit codes, which files appear
+where, and the validation image, driven through the binary and then decoded to check that
+geometry and backdrop are both really in it.
 
 ## Samples
 
