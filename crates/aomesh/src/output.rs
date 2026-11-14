@@ -44,6 +44,33 @@ impl OutputNames {
     ///
     /// With no explicit destination the outputs join the input under an `_ao`
     /// suffix, so a bake never overwrites the mesh it came from.
+    ///
+    /// ```
+    /// use aomesh::output::OutputNames;
+    /// use std::path::Path;
+    ///
+    /// let names = OutputNames::resolve(Path::new("meshes/torus.obj"), None, "aomesh_ao");
+    /// assert_eq!(names.object, Path::new("meshes/torus_ao.obj"));
+    /// assert_eq!(names.material, Path::new("meshes/torus_ao.mtl"));
+    /// assert_eq!(names.texture, Path::new("meshes/torus_ao.png"));
+    /// // Inside the OBJ the references are bare file names: the three outputs are
+    /// // written side by side, so the mesh stays portable as a set.
+    /// assert_eq!(names.material_reference, "torus_ao.mtl");
+    /// assert_eq!(names.texture_reference, "torus_ao.png");
+    ///
+    /// // A destination renames the whole set and moves it too.
+    /// let moved = OutputNames::resolve(
+    ///     Path::new("meshes/torus.obj"),
+    ///     Some(Path::new("out/baked.obj")),
+    ///     "ao",
+    /// );
+    /// assert_eq!(moved.object, Path::new("out/baked.obj"));
+    /// assert_eq!(moved.texture, Path::new("out/baked.png"));
+    ///
+    /// // A destination with no extension is taken as a stem.
+    /// let stem = OutputNames::resolve(Path::new("m.obj"), Some(Path::new("out/ao")), "ao");
+    /// assert_eq!(stem.object, Path::new("out/ao.obj"));
+    /// ```
     #[must_use]
     pub fn resolve(input: &Path, output: Option<&Path>, material_name: &str) -> Self {
         let object = match output {

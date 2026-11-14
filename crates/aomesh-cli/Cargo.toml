@@ -16,6 +16,11 @@ categories = ["command-line-utilities", "graphics"]
 [[bin]]
 name = "aomesh"
 path = "src/main.rs"
+# The program is `aomesh`, and rustdoc would otherwise write its page over the
+# library's at target/doc/aomesh/index.html (rust-lang/cargo#6313). A binary's `main`
+# is not a crate anyone links against; documentation lives in the library and here:
+# `aomesh --help`.
+doc = false
 
 [features]
 # Forwards to the library: the traversal counters this prints live there.

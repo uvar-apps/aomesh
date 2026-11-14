@@ -8,9 +8,8 @@
 //!
 //! Two properties matter for the numbers the bake reports:
 //!
-//! * **Triangle order is never assumed.** The hierarchy permutes triangle
-//!   indices internally and the caller's [`Geometry`](crate::geometry::Geometry)
-//!   stays untouched.
+//! * **Triangle order is never assumed.** The hierarchy permutes triangle indices
+//!   internally and the caller's [`Geometry`] stays untouched.
 //! * **A hit is scale-invariant.** Both the "ray parallel to the triangle" test
 //!   and the parametric hit range are ratios, so a mesh authored in microns and
 //!   one authored in kilometres report the same visibility.
@@ -52,9 +51,11 @@ use crate::geometry::Geometry;
 
 /// Per-query counters, behind the `count` feature, for measuring the walk.
 ///
-/// `cargo build --release --features count` then `RAYON_NUM_THREADS=1 target/release/aomesh
-/// mesh.obj -s 64 --no-preview` prints, besides the phase times: how many segments were
-/// cast, how many nodes and triangles each reaches, and the share that turn out blocked.
+/// Build `aomesh-cli` with `--features count` and it prints these, besides the phase
+/// timers: how many segments were cast, how many nodes and triangles each reaches, and
+/// the share that turn out blocked. Reading them next to a timing wants
+/// `RAYON_NUM_THREADS=1` — the per-query counts are threading-independent, the wall
+/// clock is not, and pairing the two across different thread counts compares nothing.
 /// Every number quoted in this module's documentation came from here.
 #[cfg(feature = "count")]
 pub mod counters {
@@ -267,6 +268,43 @@ impl Default for Bvh {
 impl Bvh {
     /// Build a hierarchy over `geo`. Cheap enough to rebuild per run; an empty
     /// mesh yields a hierarchy that blocks nothing.
+    ///
+    /// ```
+    /// use aomesh::bvh::Bvh;
+    /// use aomesh::geometry::Geometry;
+    ///
+    /// const CUBE: &str = "\
+    /// v 0 0 0
+    /// v 1 0 0
+    /// v 1 1 0
+    /// v 0 1 0
+    /// v 0 0 1
+    /// v 1 0 1
+    /// v 1 1 1
+    /// v 0 1 1
+    /// f 1 4 3 2
+    /// f 5 6 7 8
+    /// f 1 2 6 5
+    /// f 3 4 8 7
+    /// f 1 5 8 4
+    /// f 2 3 7 6
+    /// ";
+    /// let geometry = Geometry::from_obj(&objserde::parse(CUBE).expect("the fixture parses"));
+    /// let bvh = Bvh::build(&geometry);
+    ///
+    /// // Through the middle of the cube: blocked.
+    /// assert!(bvh.segment_blocked([-1.0, 0.5, 0.5], [2.0, 0.5, 0.5], u32::MAX));
+    /// // Past it in every direction: not. `u32::MAX` names no vertex, so nothing is
+    /// // exempted; a real query passes the index of the vertex it stands on.
+    /// assert!(!bvh.segment_blocked([-1.0, 9.0, 9.0], [2.0, 9.0, 9.0], u32::MAX));
+    /// // A zero-length segment crosses nothing, which is why a viewpoint coinciding
+    /// // with its vertex cannot report that vertex hidden.
+    /// assert!(!bvh.segment_blocked([0.5, 0.5, 0.5], [0.5, 0.5, 0.5], u32::MAX));
+    ///
+    /// let (min, max) = bvh.bounds();
+    /// assert_eq!(min, [0.0, 0.0, 0.0]);
+    /// assert_eq!(max, [1.0, 1.0, 1.0]);
+    /// ```
     #[must_use]
     pub fn build(geo: &Geometry) -> Self {
         if geo.triangles.is_empty() {

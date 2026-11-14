@@ -30,6 +30,24 @@ pub struct Geometry {
 
 impl Geometry {
     /// Project an OBJ onto ray-casting geometry.
+    ///
+    /// ```
+    /// use aomesh::geometry::Geometry;
+    ///
+    /// // One quad, one degenerate face, and nothing else.
+    /// let obj = objserde::parse(
+    ///     "v 0 0 0\nv 1 0 0\nv 1 1 0\nv 0 1 0\nf 1 2 3 4\nf 1 2 1\n",
+    /// )
+    /// .expect("the fixture parses");
+    /// let geometry = Geometry::from_obj(&obj);
+    ///
+    /// assert_eq!(geometry.positions.len(), 4, "positions stay in file order");
+    /// assert_eq!(geometry.triangles.len(), 2, "the quad fans into two");
+    /// for normal in &geometry.normals {
+    ///     assert_eq!(normal, &[0.0, 0.0, 1.0], "a planar counterclockwise quad faces +z");
+    /// }
+    /// assert!((geometry.diagonal() - 2.0f64.sqrt()).abs() < 1e-12);
+    /// ```
     #[must_use]
     pub fn from_obj(obj: &Obj) -> Self {
         // Positions and normals both come out of `bind`, which guarantees they are

@@ -58,6 +58,24 @@ pub const VIEW_RADIUS_FACTOR: f64 = 50.0;
 /// The lattice is chosen over random sampling because it is both uniform and
 /// deterministic: the same `count` always yields bit-identical directions, so a
 /// bake is reproducible and its error does not wander between runs.
+///
+/// ```
+/// use aomesh::ao::fibonacci_sphere;
+///
+/// let directions = fibonacci_sphere(512);
+/// assert_eq!(directions.len(), 512);
+/// assert!(
+///     directions
+///         .iter()
+///         .all(|d| (d[0] * d[0] + d[1] * d[1] + d[2] * d[2] - 1.0).abs() < 1e-12),
+///     "every direction is a unit vector, so a dot product with a unit normal is cos θ"
+/// );
+/// assert!(directions.iter().any(|d| d[2] > 0.99), "the poles are covered");
+/// assert!(directions.iter().any(|d| d[2] < -0.99), "and the south pole");
+/// // Deterministic, exactly: a bake with the same settings is the same bake.
+/// assert_eq!(fibonacci_sphere(64), fibonacci_sphere(64));
+/// assert!(fibonacci_sphere(0).is_empty(), "no viewpoints, nothing in front of anything");
+/// ```
 #[must_use]
 pub fn fibonacci_sphere(count: usize) -> Vec<[f64; 3]> {
     if count == 0 {
@@ -87,6 +105,44 @@ pub fn fibonacci_sphere(count: usize) -> Vec<[f64; 3]> {
 /// Vertices are independent and are distributed over rayon worker threads; each
 /// accumulates into its own sums, which keeps the result free of any summation-order
 /// dependence.
+///
+/// ```
+/// use aomesh::ao::vertex_visibility;
+/// use aomesh::geometry::Geometry;
+///
+/// // A floor, and a wall standing two units off it, beside one corner.
+/// const FLOOR: &str = "v 0 0 0\nv 8 0 0\nv 8 8 0\nv 0 8 0\nf 1 2 3 4\n";
+/// const WALL: &str = "v -2 0 0\nv -2 8 0\nv -2 8 4\nv -2 0 4\nf 5 6 7 8\n";
+///
+/// // The floor alone: every vertex exactly 1.0. A ray leaving the plane never comes
+/// // back to it, so openness normalizes to openness — white is reachable, and an
+/// // exposed surface is not merely the brightest thing in the bake, it is white.
+/// let floor = Geometry::from_obj(&objserde::parse(FLOOR).expect("the fixture parses"));
+/// let open = vertex_visibility(&floor, 256);
+/// assert!(
+///     open.iter().all(|&value| value == 1.0),
+///     "an unobstructed plane should read exactly 1.0, got {open:?}"
+/// );
+///
+/// // Add the wall. The corner beside it darkens; the corner across the floor
+/// // barely notices. The measurement is directional, not a global dimmer, and the
+/// // wall's own far side (normal pointing away from the floor) stays open too.
+/// let both = Geometry::from_obj(
+///     &objserde::parse(&format!("{FLOOR}{WALL}")).expect("the fixture parses"),
+/// );
+/// let values = vertex_visibility(&both, 256);
+/// assert!(
+///     values[0] < values[2],
+///     "the vertex beside the wall ({:?}) should be darker than the one across the \
+///      floor ({:?})",
+///     values[0],
+///     values[2],
+/// );
+/// assert!(
+///     values[0] > 0.5,
+///     "one wall darkens a corner, it does not bury it: {values:?}"
+/// );
+/// ```
 #[must_use]
 pub fn vertex_visibility(geo: &Geometry, samples: usize) -> Vec<f64> {
     if geo.positions.is_empty() {
@@ -166,10 +222,17 @@ fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
 }
 
 /// Spread of a visibility batch, for the run summary.
+///
+/// A bake whose `max` is below 1.0 has no white in it, which means the mesh occludes
+/// itself everywhere including where it should be open sky — worth seeing before the
+/// render does. A `min` of exactly 0.0 means something sealed a surface completely.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct VisibilityReport {
+    /// The darkest vertex.
     pub min: f64,
+    /// Arithmetic mean over all vertices, dominated by whichever surface is largest.
     pub mean: f64,
+    /// The brightest vertex: 1.0 whenever any surface faces open sky.
     pub max: f64,
 }
 
