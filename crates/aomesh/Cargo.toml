@@ -1,0 +1,40 @@
+[package]
+name = "aomesh"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "README.md"
+description = "Per-vertex ambient occlusion baked into 1D texture coordinates and a 256x1 grayscale texture"
+keywords = ["obj", "ambient-occlusion", "mesh", "bake", "3d"]
+categories = ["graphics", "rendering"]
+
+[features]
+# Per-vertex node-traversal counters and phase timers, printed by the CLI. They are
+# the instrument behind every figure in the documentation, and they are not free:
+# the atomics cost real time, so build without this feature to measure anything.
+count = []
+
+[lib]
+name = "aomesh"
+path = "src/lib.rs"
+
+[dependencies]
+objserde.workspace = true
+image.workspace = true
+rayon.workspace = true
+thiserror.workspace = true
+
+# `meshview` is a dev-dependency and nothing more. The tests read a generated OBJ back
+# with it as the independent reader, so a bake cannot agree with its own writer and
+# still be wrong to everyone else. Drawing is not this crate's job: the validation-image
+# renderer lives in `aomesh-cli`, which is why no rasterizer — and none of the twenty
+# crates it carries, `clap` among them — appears in `[dependencies]` above.
+#
+# objserde and image are ordinary dependencies, so an integration test already sees
+# both; only the scratch directory and the independent reader are added here.
+[dev-dependencies]
+tempfile.workspace = true
+meshview.workspace = true

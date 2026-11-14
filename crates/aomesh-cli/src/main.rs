@@ -1,5 +1,7 @@
 //! `aomesh` — bake per-vertex ambient occlusion into a 1D texture.
 
+mod preview;
+
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -7,7 +9,7 @@ use std::time::Instant;
 
 use clap::Parser;
 
-use aomesh::{BakeOptions, ao, bake, preview};
+use aomesh::{BakeOptions, ao, bake};
 
 /// Bake per-vertex ambient occlusion into 1D texture coordinates.
 ///

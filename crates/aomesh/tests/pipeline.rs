@@ -10,7 +10,7 @@ mod common;
 
 use std::path::Path;
 
-use aomesh::{BakeError, BakeOptions, bake, preview, texture};
+use aomesh::{BakeError, BakeOptions, bake, texture};
 
 /// Cube with a 2×2 quad grid per face: 26 vertices, 24 quads, 48 triangles.
 fn cube_fixture(directory: &Path) -> std::path::PathBuf {
@@ -223,39 +223,6 @@ fn a_renderer_resolves_the_texture_onto_every_triangle() {
 }
 
 #[test]
-fn the_validation_image_shows_both_meshes() {
-    let directory = tempfile::tempdir().expect("temp dir");
-    let input = cube_fixture(directory.path());
-    let report = bake(&input, None, &options(64)).expect("bake");
-    let image_path = directory.path().join("cube_ao_preview.png");
-
-    preview::render_preview(&input, &report.object, &image_path, 128).expect("preview renders");
-    assert!(image_path.exists());
-    let sheet = image::open(&image_path)
-        .expect("preview decodes")
-        .to_rgba8();
-    assert!(
-        sheet.width() >= 2 * 128,
-        "both panels should be side by side, got {} px",
-        sheet.width()
-    );
-
-    let mut surface = 0usize;
-    let mut backdrop = 0usize;
-    for pixel in sheet.pixels() {
-        let [r, g, b, _] = pixel.0;
-        if r == g && b == g {
-            surface += 1;
-        }
-        if [r, g, b] == preview::PREVIEW_BACKGROUND {
-            backdrop += 1;
-        }
-    }
-    assert!(surface > 100, "geometry should be drawn in the panels");
-    assert!(backdrop > 100, "the backdrop frames both panels");
-}
-
-#[test]
 fn a_bake_replaces_the_meshs_own_texture_with_its_occlusion() {
     let directory = tempfile::tempdir().expect("temp dir");
     let input = common::write_mesh(directory.path(), "textured.obj", TEXTURED_FIXTURE);
@@ -297,24 +264,6 @@ fn a_bake_replaces_the_meshs_own_texture_with_its_occlusion() {
         !directory.path().join("original_ao.mtl").exists(),
         "the input's library is not baked alongside"
     );
-}
-
-#[test]
-fn the_preview_still_renders_when_a_source_texture_cannot_be_decoded() {
-    // albedo.png named by the fixture's library does not exist. A texture is
-    // presentation: its triangles fall back to the flat Kd tint, and the image —
-    // whose right panel is the whole point — still comes out.
-    let directory = tempfile::tempdir().expect("temp dir");
-    let input = common::write_mesh(directory.path(), "textured.obj", TEXTURED_FIXTURE);
-    common::write_mesh(directory.path(), "original.mtl", ORIGINAL_MTL);
-    let report = bake(&input, None, &options(16)).expect("bake");
-
-    let image_path = directory.path().join("fallback_preview.png");
-    preview::render_preview(&input, &report.object, &image_path, 96).expect("preview renders");
-    let sheet = image::open(&image_path)
-        .expect("preview decodes")
-        .to_rgba8();
-    assert!(sheet.width() >= 2 * 96, "both panels present");
 }
 
 /// A lone triangle with materials, a library reference and hand-written UVs.

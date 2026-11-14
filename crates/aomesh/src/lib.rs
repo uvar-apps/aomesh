@@ -13,9 +13,11 @@
 //! real geometry — a cavity wall, a plate resting above — darkens a vertex. A viewpoint at
 //! exactly 90° carries no weight at all, so a grazing ray cannot call a vertex hidden.
 //!
-//! Three dependencies carry the whole product, each doing one job:
-//! [`objserde`] reads and writes the OBJ and MTL, a hand-built [`Bvh`] answers the
-//! visibility questions, and [`meshview`] rasterizes the validation image.
+//! Two dependencies carry the compute, each doing one job: [`objserde`] reads and
+//! writes the OBJ and MTL, and a hand-built [`bvh::Bvh`] answers the visibility
+//! questions. `image` encodes the ramp. Nothing here draws a picture of the result —
+//! the validation image the command-line tool writes is that tool's own concern, and
+//! `aomesh-cli` is the package holding the rasterizer.
 //!
 //! ```no_run
 //! use aomesh::{BakeOptions, bake};
@@ -29,7 +31,6 @@ pub mod ao;
 pub mod bvh;
 pub mod geometry;
 pub mod output;
-pub mod preview;
 pub mod texture;
 
 use std::path::{Path, PathBuf};
