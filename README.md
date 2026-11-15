@@ -230,7 +230,7 @@ pass for a bake that is quietly wrong.
 ## Verification
 
 ```sh
-cargo test --workspace     # 29 tests, 9 doctests; also compiles the 3 examples
+cargo test --workspace     # 30 tests, 10 doctests; also compiles the 3 examples
 cargo clippy --workspace --all-targets
 cargo fmt --all --check
 ```
@@ -281,7 +281,7 @@ one by one, so thread scheduling cannot quietly become part of an output.
 Beyond that the library's suite covers the written files (one `vt` per vertex, corners kept
 as `v/vt/vn`, `vt` arity, relative references in the MTL, the ramp's exact pixel values), the
 sampler round-trip, scale invariance, bit-for-bit reproducibility and the error taxonomy —
-and its nine doctests run rather than merely compile, each asserting a claim the prose makes.
+and its ten doctests run rather than merely compile, each asserting a claim the prose makes.
 The CLI's suite covers what only a program has: flag handling, exit codes, which files appear
 where, and the validation image, driven through the binary and then decoded to check that
 geometry and backdrop are both really in it.
