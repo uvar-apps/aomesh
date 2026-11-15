@@ -61,8 +61,8 @@
 //!
 //! | file | contents |
 //! | --- | --- |
-//! | `<stem>_ao.obj` | the input's geometry, plus one `vt u u` per vertex and a reference to the new library |
-//! | `<stem>_ao.mtl` | one material selecting the ramp with `map_Kd -imfchan l`, so a diffuse-only pipeline reads luminance from that one channel |
+//! | `<stem>_ao.obj` | the input's geometry, header comments, objects and groups, plus one `vt u u` per vertex and a reference to the new library |
+//! | `<stem>_ao.mtl` | one material whose `map_Kd` is the ramp, with no map options, so every MTL reader finds the file |
 //! | `<stem>_ao.png` | the `256 × 1` grayscale ramp, texel *k* storing the value *k* |
 //!
 //! The names come from [`output::OutputNames::resolve`]: beside the input under an `_ao`

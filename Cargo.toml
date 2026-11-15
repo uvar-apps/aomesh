@@ -4,16 +4,16 @@ members = ["crates/aomesh", "crates/aomesh-cli"]
 default-members = ["crates/aomesh", "crates/aomesh-cli"]
 
 [workspace.package]
-version = "0.3.1"
+version = "0.4.0"
 edition = "2024"
 rust-version = "1.85"
-authors = ["Ugo Garetto"]
+authors = ["Ugo Varetto"]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/uvar-apps/aomesh"
 
 [workspace.dependencies]
-aomesh = { version = "0.3.1", path = "crates/aomesh" }
-objserde = "0.2"
+aomesh = { version = "0.4.0", path = "crates/aomesh" }
+objserde = "0.3"
 # Used only as a rasterizer for the validation image. It never reads or writes an
 # OBJ here: the mesh it draws is assembled from the objserde model.
 meshview = "0.3"

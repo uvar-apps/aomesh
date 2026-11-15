@@ -37,8 +37,8 @@ Three files come out, named after the input; the input itself is never modified:
 
 | file | contents |
 | --- | --- |
-| `seat_ao.obj` | the same geometry, plus one `vt u u` per vertex and a reference to the new library |
-| `seat_ao.mtl` | one material, `map_Kd -imfchan l` at the ramp, so a diffuse-only pipeline reads luminance from that one channel |
+| `seat_ao.obj` | the same geometry, header comments, objects and groups, plus one `vt u u` per vertex and a reference to the new library |
+| `seat_ao.mtl` | one material whose `map_Kd` is the ramp, with no map options, so every MTL reader finds the file |
 | `seat_ao.png` | `256 × 1` grayscale ramp, texel *k* storing the value *k* |
 
 Pass a destination to move and rename the set — the MTL and PNG follow the destination's stem,

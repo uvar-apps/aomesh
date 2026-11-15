@@ -64,9 +64,58 @@ fn an_explicit_destination_renames_the_whole_set() {
     // References inside the files stay relative to the OBJ.
     let mtl = std::fs::read_to_string(&report.material).expect("mtl reads");
     assert!(
-        mtl.contains("map_Kd -imfchan l other.png"),
-        "the library must point at its own texture by name:\n{mtl}"
+        mtl.contains("\nmap_Kd other.png\n"),
+        "the library must point at its own texture by name, with no options:\n{mtl}"
     );
+    // `-imfchan` is for scalar maps; on `map_Kd` a reader that does not know it
+    // (three.js's MTLLoader) reads it as part of the file name.
+    assert!(!mtl.contains("-imfchan"), "{mtl}");
+}
+
+/// A molecular surface arrives with a provenance header and one group per
+/// connected component; the bake must hand both back, each group still in
+/// front of the faces it named.
+#[test]
+fn header_comments_objects_and_groups_survive_the_bake() {
+    let directory = tempfile::tempdir().expect("temp dir");
+    let (cube, _) = common::cube_with_kinds(2);
+    // Split the cube's faces into two groups under one object, behind a header.
+    let mut text = String::from("# sesmesh 1.1.2\n# area_A2: 6.0000\no ses\n");
+    let mut faces_seen = 0;
+    for line in cube.lines() {
+        if line.starts_with("f ") {
+            if faces_seen == 0 {
+                text.push_str("g component_0\n");
+            } else if faces_seen == 12 {
+                text.push_str("g cavity_1\n");
+            }
+            faces_seen += 1;
+        }
+        text.push_str(line);
+        text.push('\n');
+    }
+    let input = common::write_mesh(directory.path(), "grouped.obj", &text);
+
+    let report = bake(&input, None, &options(16)).expect("bake");
+
+    let written = std::fs::read_to_string(&report.object).expect("baked obj reads");
+    assert!(
+        written.starts_with("# sesmesh 1.1.2\n# area_A2: 6.0000\nmtllib grouped_ao.mtl\n"),
+        "{written}"
+    );
+    let baked = objserde::parse(&written).expect("baked obj parses");
+    let source = objserde::parse(&text).expect("source parses");
+    assert_eq!(baked.objects, ["ses"]);
+    assert_eq!(baked.groups, ["component_0", "cavity_1"]);
+    let groups = |obj: &objserde::Obj| -> Vec<Option<u32>> {
+        obj.faces.iter().map(|face| face.group).collect()
+    };
+    assert_eq!(
+        groups(&baked),
+        groups(&source),
+        "every face keeps its group"
+    );
+    assert!(baked.faces.iter().all(|face| face.object == Some(0)));
 }
 
 #[test]

@@ -65,6 +65,14 @@ only member carrying meshview.
 > no computed value changed, and [Performance](#performance) has the byte-by-byte proof
 > against `v0.2.0`. (0.2.0's own minor bump was for `Bvh::segment_blocked` losing a
 > parameter, for the same reason: a library surface change, not a behaviour change.)
+>
+> **From 0.3.** Two output changes make 0.4.0. The baked OBJ keeps the input's header
+> comments, `o` objects and `g` groups (objserde 0.3 models them), so a molecular surface
+> split into one group per component comes back split, provenance header included. And the
+> MTL's map line is now plain `map_Kd <ramp>.png`: `-imfchan l` is defined for scalar maps,
+> not `map_Kd`, and three.js's `MTLLoader` read it as part of the file name and loaded no
+> texture. The ramp is greyscale, so every channel reads the same grey. No visibility value
+> changed.
 
 A run leaves four files next to the mesh it read, and never modifies that mesh:
 
@@ -130,10 +138,12 @@ occludes nothing.
 
 **Storage.** Visibility becomes the texture coordinate. The generated OBJ carries one `vt`
 per vertex — a corner addresses its own vertex's entry, so the file reads directly — and
-the MTL declares one material whose `map_Kd` is the ramp, sampled through its luminance
-channel with `-imfchan l`. Geometry, trailing vertex fields and `vn` bindings pass through
-untouched; the input's own materials are replaced, since this file's material exists to
-carry occlusion.
+the MTL declares one material whose `map_Kd` is the ramp, with no map options: the ramp
+is greyscale, so any channel a renderer samples is the same grey, and an option such as
+`-imfchan` (meant for scalar maps) is one some readers take for part of the file name.
+Geometry, trailing vertex fields, `vn` bindings, the header comments before the first
+record and the `o`/`g` lines pass through untouched; the input's own materials are
+replaced, since this file's material exists to carry occlusion.
 
 Writing goes through objserde's structural mode (`Obj`'s `Display`) rather than its
 `write_mesh`: the latter normalizes faces to `f a//a b//b c//c` and cannot express a `vt`
@@ -230,7 +240,7 @@ pass for a bake that is quietly wrong.
 ## Verification
 
 ```sh
-cargo test --workspace     # 30 tests, 10 doctests; also compiles the 3 examples
+cargo test --workspace     # 31 tests, 10 doctests; also compiles the 3 examples
 cargo clippy --workspace --all-targets
 cargo fmt --all --check
 ```

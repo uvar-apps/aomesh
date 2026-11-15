@@ -60,11 +60,11 @@ dependencies = [
 
 [[package]]
 name = "aomesh"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "image",
  "meshview",
- "objserde",
+ "objserde 0.3.0",
  "rayon",
  "tempfile",
  "thiserror",
@@ -72,13 +72,13 @@ dependencies = [
 
 [[package]]
 name = "aomesh-cli"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "aomesh",
  "clap",
  "image",
  "meshview",
- "objserde",
+ "objserde 0.3.0",
  "tempfile",
  "thiserror",
 ]
@@ -293,7 +293,7 @@ checksum = "b3ea16c5078f1cfef34cd121450f049cce2354e57f607d88f6b89c7791df5a0a"
 dependencies = [
  "clap",
  "image",
- "objserde",
+ "objserde 0.2.0",
  "thiserror",
 ]
 
@@ -341,6 +341,12 @@ name = "objserde"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d9b27a9a5fbac059005761c0b61ed2dbfc1789a016e7a5c17641f5809660b641"
+
+[[package]]
+name = "objserde"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ee85708e743aad21797b308030a544492bef212acb3fe13e340ecd41195da605"
 
 [[package]]
 name = "once_cell"
