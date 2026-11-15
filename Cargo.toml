@@ -26,8 +26,3 @@ tempfile = "3"
 [profile.release]
 lto = true
 codegen-units = 1
-
-# TEMPORARY, until objserde 0.3.0 is on crates.io: build against the local
-# checkout. Remove before `cargo publish` (publishing resolves the registry).
-[patch.crates-io]
-objserde = { path = "../objserde" }
