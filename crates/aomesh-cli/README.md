@@ -47,8 +47,8 @@ input's name with `_ao` appended):
 
 | file | what it is |
 | --- | --- |
-| `torus_ao.obj` | the same geometry — positions, normals, trailing vertex fields — with one `vt u u` per vertex |
-| `torus_ao.mtl` | one material: `map_Kd -imfchan l torus_ao.png`, so a diffuse-only pipeline reads occlusion from the single channel's luminance |
+| `torus_ao.obj` | the same geometry — positions, normals, trailing vertex fields, header comments, objects and groups — with one `vt u u` per vertex |
+| `torus_ao.mtl` | one material: `map_Kd torus_ao.png`, so a diffuse-only pipeline reads occlusion as an ordinary colour map |
 | `torus_ao.png` | the ramp: 256 pixels wide, one tall, texel *k* storing the value *k* |
 | `torus_ao_preview.png` | the source mesh and the bake side by side under one shared orthographic camera, so any difference between the panels is a shading difference and nothing else |
 
