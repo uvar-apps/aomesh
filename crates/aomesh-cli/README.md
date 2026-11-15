@@ -58,19 +58,24 @@ carry occlusion.
 
 ### Failure
 
-A bake that cannot happen prints one line on stderr and exits 1:
+A bake that cannot happen prints one line on stderr and exits 1, naming the file once:
 
 ```
-$ aomesh nofaces.obj          # parsed, but nothing to occlude against
+$ aomesh nope.obj                 # nothing there
+aomesh: nope.obj: No such file or directory (os error 2)
+$ aomesh badnum.obj               # a coordinate that is not a number
+aomesh: badnum.obj: line 1: cannot read `x` as a number
+$ aomesh nofaces.obj              # parsed, but nothing to occlude against
 aomesh: nofaces.obj: nothing to occlude against — the file has no triangles
-$ aomesh nope.obj             # nothing there, or unreadable
-aomesh: nope.obj: nope.obj: No such file or directory (os error 2)
+$ aomesh mesh.obj -o notadir/out.obj  # `notadir` exists, but as a file
+aomesh: notadir/out.obj: Not a directory (os error 20)
 ```
 
-The second line repeats the path — objserde prefixes it in its own error and `aomesh` prefixes
-it again. A cosmetic flaw in a message, found while writing this README; fixing it would
-change the program's output, so it is filed as [uvar-apps/aomesh#8](https://github.com/uvar-apps/aomesh/issues/8)
-rather than slipped into a release whose whole claim is that its bytes did not move.
+Up to and including 0.3.0 the first of those printed the path twice, because objserde names
+the file inside its own I/O error and `aomesh` prefixed it again. Fixed in 0.3.1
+([#8](https://github.com/uvar-apps/aomesh/issues/8)) — and only for that variant: objserde's
+syntax errors carry a line number but no file name, so the prefix still has to be there for
+anything that fails to parse.
 
 Anything the argument parser rejects — an unknown flag, `-s 0` — exits 2 with clap's own
 `error: …` message instead, before any file is opened.

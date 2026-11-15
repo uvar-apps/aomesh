@@ -137,6 +137,11 @@ fn a_missing_input_fails_with_a_message_and_a_nonzero_status() {
     let message = stderr(&output);
     assert!(message.starts_with("aomesh:"), "{message}");
     assert!(message.contains("nope.obj"), "{message}");
+    assert_eq!(
+        message.matches("nope.obj").count(),
+        1,
+        "the path should appear once, not once per layer that prefixed it: {message}"
+    );
     assert!(
         stdout(&output).is_empty(),
         "nothing should be reported as written, got {}",
