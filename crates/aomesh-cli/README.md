@@ -67,8 +67,8 @@ $ aomesh badnum.obj               # a coordinate that is not a number
 aomesh: badnum.obj: line 1: cannot read `x` as a number
 $ aomesh nofaces.obj              # parsed, but nothing to occlude against
 aomesh: nofaces.obj: nothing to occlude against — the file has no triangles
-$ aomesh mesh.obj -o home/out.obj # a directory that cannot be created
-aomesh: home/out.obj: Not a directory (os error 20)
+$ aomesh mesh.obj -o notadir/out.obj  # `notadir` exists, but as a file
+aomesh: notadir/out.obj: Not a directory (os error 20)
 ```
 
 Up to and including 0.3.0 the first of those printed the path twice, because objserde names
