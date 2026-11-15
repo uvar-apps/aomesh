@@ -60,7 +60,7 @@ dependencies = [
 
 [[package]]
 name = "aomesh"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "image",
  "meshview",
@@ -72,7 +72,7 @@ dependencies = [
 
 [[package]]
 name = "aomesh-cli"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "aomesh",
  "clap",

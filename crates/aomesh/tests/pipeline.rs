@@ -313,4 +313,72 @@ fn a_missing_input_is_reported_with_its_path() {
         "expected a parse error, got {error}"
     );
     assert!(error.to_string().contains("nowhere.obj"), "{error}");
+    assert_eq!(error.path(), absent, "the accessor hands over the file");
+}
+
+/// How many times a message says a file's name. Once is right: twice means two layers
+/// each prefixed the same path, and zero means the caller cannot tell which file broke.
+fn times_named(message: &str, name: &str) -> usize {
+    message.matches(name).count()
+}
+
+#[test]
+fn every_failure_names_its_file_exactly_once() {
+    let directory = tempfile::tempdir().expect("temp dir");
+
+    // The case that started it: objserde's own I/O error already spells the path out, so
+    // prefixing it again printed the file twice.
+    let absent = directory.path().join("nowhere.obj");
+    let error = bake(&absent, None, &options(8)).expect_err("nothing to read");
+    assert_eq!(
+        times_named(&error.to_string(), "nowhere.obj"),
+        1,
+        "missing input: {error}"
+    );
+
+    // The mirror case, and the reason the fix is conditional: a syntax error carries a
+    // line number and no file name at all, so the wrapper's prefix is the only thing
+    // naming it. Dropping the prefix everywhere — the obvious way to fix the case above —
+    // would make every malformed OBJ anonymous. A test on the missing file alone would
+    // have passed.
+    let malformed = common::write_mesh(
+        directory.path(),
+        "malformed.obj",
+        "v 0 0 x\nv 1 0 0\nv 0 1 0\nf 1 2 3\n",
+    );
+    let error = bake(&malformed, None, &options(8)).expect_err("`x` is not a coordinate");
+    let message = error.to_string();
+    assert_eq!(times_named(&message, "malformed.obj"), 1, "{message}");
+    assert!(
+        message.contains("line 1"),
+        "the line number survives: {message}"
+    );
+
+    // Refused for having nothing to occlude against: named once, and it is a `Empty`.
+    let bare = common::write_mesh(directory.path(), "bare.obj", "v 0 0 0\nv 1 0 0\n");
+    let error = bake(&bare, None, &options(8)).expect_err("no triangles");
+    assert!(matches!(error, BakeError::Empty { .. }), "{error}");
+    assert_eq!(times_named(&error.to_string(), "bare.obj"), 1, "{error}");
+
+    // An output that cannot be written names the destination once — `blocker` is a file,
+    // so `blocker/inner/` can never exist.
+    std::fs::write(directory.path().join("blocker"), "").expect("blocker written");
+    let blocked = directory.path().join("blocker/inner/out.obj");
+    let input = cube_fixture(directory.path());
+    let error = bake(&input, Some(&blocked), &options(8))
+        .expect_err("a directory cannot be made inside a file");
+    assert!(
+        matches!(error, BakeError::Io { .. }),
+        "expected an output failure, got {error}"
+    );
+    assert_eq!(
+        times_named(&error.to_string(), "out.obj"),
+        1,
+        "unwritable destination: {error}"
+    );
+    assert_eq!(
+        error.path(),
+        blocked,
+        "and the accessor names the output, not the mesh being baked"
+    );
 }

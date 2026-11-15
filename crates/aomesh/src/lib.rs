@@ -133,11 +133,17 @@
 //!
 //! # Errors
 //!
-//! [`BakeError`] names the offending path in every case. [`BakeError::Parse`] means the
-//! OBJ could not be read, which includes a path that is not there; [`BakeError::Empty`]
+//! Every variant carries the file it is about, and [`BakeError::path`] returns it — prefer
+//! that to matching the message, whose wording is for humans. [`BakeError::Parse`] means
+//! the OBJ could not be read, which includes a path that is not there; [`BakeError::Empty`]
 //! means it holds no triangles, so there is nothing to occlude against and a bake would
 //! be a blank lie; [`BakeError::Io`] means an output could not be written. The first two
 //! are the input's problem and the third is the destination's.
+//!
+//! A displayed message names the file exactly once. That is a deliberate asymmetry rather
+//! than a rule: objserde's I/O error already spells the path out, so the prefix is dropped
+//! for it, while objserde's syntax errors report a line number and no file at all, so the
+//! prefix is the only thing naming the file there.
 //!
 //! # Requirements
 //!
@@ -161,9 +167,8 @@ pub const DEFAULT_MATERIAL_NAME: &str = "aomesh_ao";
 #[derive(Debug, Error)]
 pub enum BakeError {
     /// The OBJ could not be read — it does not parse, or there is nothing at that
-    /// path. The message names the file; [`objserde::ObjError`] says which line.
-    /// Nothing is written.
-    #[error("{}: {source}", .path.display())]
+    /// path. [`BakeError::path`] gives the file; the message carries objserde's own
+    /// detail, which for a syntax problem names the line. Nothing is written.
     Parse {
         path: PathBuf,
         source: objserde::ObjError,
@@ -171,7 +176,6 @@ pub enum BakeError {
     /// An output could not be written: the destination is not writable, or its parent
     /// cannot be created. Earlier outputs of the same bake may already exist, so a
     /// caller that cares should treat a bake as all-or-nothing by destination.
-    #[error("{}: {source}", .path.display())]
     Io {
         path: PathBuf,
         source: std::io::Error,
@@ -179,8 +183,53 @@ pub enum BakeError {
     /// The file parsed but holds no triangle with three distinct corners, so there is
     /// nothing for rays to hit and every vertex would report 1.0 — a bake that would
     /// produce three files telling a lie about the mesh. Refused instead.
-    #[error("{}: nothing to occlude against — the file has no triangles", .path.display())]
     Empty { path: PathBuf },
+}
+
+impl std::fmt::Display for BakeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            // objserde's `Io` names the file itself, so prefixing it again printed the
+            // path twice. Its other variants report a line number and no path of any
+            // kind, so for those the prefix is the only thing telling a caller which
+            // file failed — dropping it there would trade a cosmetic duplicate for a
+            // message that cannot be acted on.
+            Self::Parse { path, source } => match source {
+                objserde::ObjError::Io { .. } => write!(f, "{source}"),
+                _ => write!(f, "{}: {source}", path.display()),
+            },
+            Self::Io { path, source } => write!(f, "{}: {source}", path.display()),
+            Self::Empty { path } => write!(
+                f,
+                "{}: nothing to occlude against — the file has no triangles",
+                path.display()
+            ),
+        }
+    }
+}
+
+impl BakeError {
+    /// The file this failure is about: the input for [`BakeError::Parse`] and
+    /// [`BakeError::Empty`], the output that could not be written for
+    /// [`BakeError::Io`]. Prefer this over matching the message, which exists for a
+    /// human and whose exact wording is not API.
+    ///
+    /// ```
+    /// use aomesh::{BakeError, bake};
+    /// use std::path::Path;
+    ///
+    /// let error = bake(Path::new("no-such-mesh.obj"), None, &Default::default())
+    ///     .expect_err("nothing at that path");
+    /// assert_eq!(error.path(), Path::new("no-such-mesh.obj"));
+    /// // The path appears once in what a user is shown.
+    /// assert_eq!(error.to_string().matches("no-such-mesh.obj").count(), 1);
+    /// ```
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        match self {
+            Self::Parse { path, .. } | Self::Io { path, .. } | Self::Empty { path } => path,
+        }
+    }
 }
 
 /// What a bake should do.
