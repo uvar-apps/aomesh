@@ -110,3 +110,7 @@ find out *where* time goes, and a plain build to measure whether it went anywher
 Rust 1.88 or newer. Dual-licensed MIT OR Apache-2.0. The library's documentation — semantics,
 output contract, the API tour — is at
 [docs.rs/aomesh](https://docs.rs/aomesh); issues on this repository.
+
+Cite the Zenodo archive if a bake of yours ends up in a publication:
+[10.5281/zenodo.24338273](https://doi.org/10.5281/zenodo.24338273) for aomesh in general,
+[10.5281/zenodo.24338274](https://doi.org/10.5281/zenodo.24338274) for version 0.5.0.

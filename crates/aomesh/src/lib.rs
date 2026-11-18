@@ -148,6 +148,15 @@
 //! # Requirements
 //!
 //! Rust 1.88 or newer; edition 2024. Dual-licensed MIT OR Apache-2.0.
+//!
+//! # Citation
+//!
+//! The project is archived on Zenodo, so a citation names fixed bytes rather than a moving
+//! repository: [10.5281/zenodo.24338273](https://doi.org/10.5281/zenodo.24338273) is the
+//! concept DOI and always resolves to the newest release, while
+//! [10.5281/zenodo.24338274](https://doi.org/10.5281/zenodo.24338274) is version 0.5.0 — cite
+//! the version DOI when the numbers in a paper came from one specific release. BibTeX, and the
+//! archive itself, are in the [repository README](https://github.com/uvar-apps/aomesh#citation).
 
 pub mod ao;
 pub mod bvh;

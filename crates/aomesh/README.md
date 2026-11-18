@@ -127,5 +127,10 @@ only as a dev-dependency, where tests use it as a second reader of what objserde
 [docs.rs](https://docs.rs/aomesh) carries the crate tour and the per-module notes, including
 what the bvh measured *not* to be faster, so nobody has to try it twice.
 
+If this contributes to work that gets published, cite the Zenodo archive:
+[10.5281/zenodo.24338273](https://doi.org/10.5281/zenodo.24338273) for aomesh in general,
+[10.5281/zenodo.24338274](https://doi.org/10.5281/zenodo.24338274) for version 0.5.0. BibTeX is in
+the [repository README](https://github.com/uvar-apps/aomesh#citation).
+
 Rust 1.88 or newer. Dual-licensed MIT OR Apache-2.0. Source and issue tracker:
 [github.com/uvar-apps/aomesh](https://github.com/uvar-apps/aomesh).
