@@ -287,9 +287,9 @@ checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
 
 [[package]]
 name = "meshview"
-version = "0.3.0"
+version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b3ea16c5078f1cfef34cd121450f049cce2354e57f607d88f6b89c7791df5a0a"
+checksum = "92e86992b9a58394d2618cb7797b5c2dbbb08a83b122c92341b19dad83c41bd0"
 dependencies = [
  "clap",
  "image",
