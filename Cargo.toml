@@ -1,19 +1,22 @@
 [workspace]
-resolver = "2"
+# "3" so dependency resolution honours `rust-version` below: without it cargo is
+# free to pick a transitive dependency newer than the floor this workspace
+# declares, and the mismatch shows up in a user's build rather than ours.
+resolver = "3"
 members = ["crates/aomesh", "crates/aomesh-cli"]
 default-members = ["crates/aomesh", "crates/aomesh-cli"]
 
 [workspace.package]
-version = "0.4.0"
+version = "0.5.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 authors = ["Ugo Varetto"]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/uvar-apps/aomesh"
 
 [workspace.dependencies]
-aomesh = { version = "0.4.0", path = "crates/aomesh" }
-objserde = "0.3"
+aomesh = { version = "0.5.0", path = "crates/aomesh" }
+objserde = "0.4"
 # Used only as a rasterizer for the validation image. It never reads or writes an
 # OBJ here: the mesh it draws is assembled from the objserde model.
 meshview = "0.3"

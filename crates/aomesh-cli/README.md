@@ -47,7 +47,7 @@ input's name with `_ao` appended):
 
 | file | what it is |
 | --- | --- |
-| `torus_ao.obj` | the same geometry — positions, normals, trailing vertex fields, header comments, objects and groups — with one `vt u u` per vertex |
+| `torus_ao.obj` | the same geometry — positions, normals, trailing vertex fields, header comments, objects, groups and smoothing statements — with one `vt u u` per vertex |
 | `torus_ao.mtl` | one material: `map_Kd torus_ao.png`, so a diffuse-only pipeline reads occlusion as an ordinary colour map |
 | `torus_ao.png` | the ramp: 256 pixels wide, one tall, texel *k* storing the value *k* |
 | `torus_ao_preview.png` | the source mesh and the bake side by side under one shared orthographic camera, so any difference between the panels is a shading difference and nothing else |
@@ -107,6 +107,6 @@ parse, build, cast, format, write, and per-ray figures like nodes visited and th
 segments that turn out blocked. Those counters are atomics on the hot path: use the build to
 find out *where* time goes, and a plain build to measure whether it went anywhere.
 
-Rust 1.85 or newer. Dual-licensed MIT OR Apache-2.0. The library's documentation — semantics,
+Rust 1.88 or newer. Dual-licensed MIT OR Apache-2.0. The library's documentation — semantics,
 output contract, the API tour — is at
 [docs.rs/aomesh](https://docs.rs/aomesh); issues on this repository.

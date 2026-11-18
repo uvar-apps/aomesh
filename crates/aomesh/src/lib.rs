@@ -61,7 +61,7 @@
 //!
 //! | file | contents |
 //! | --- | --- |
-//! | `<stem>_ao.obj` | the input's geometry, header comments, objects and groups, plus one `vt u u` per vertex and a reference to the new library |
+//! | `<stem>_ao.obj` | the input's geometry, header comments, objects, groups and smoothing statements, plus one `vt u u` per vertex and a reference to the new library |
 //! | `<stem>_ao.mtl` | one material whose `map_Kd` is the ramp, with no map options, so every MTL reader finds the file |
 //! | `<stem>_ao.png` | the `256 × 1` grayscale ramp, texel *k* storing the value *k* |
 //!
@@ -147,7 +147,7 @@
 //!
 //! # Requirements
 //!
-//! Rust 1.85 or newer; edition 2024. Dual-licensed MIT OR Apache-2.0.
+//! Rust 1.88 or newer; edition 2024. Dual-licensed MIT OR Apache-2.0.
 
 pub mod ao;
 pub mod bvh;

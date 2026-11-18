@@ -127,5 +127,5 @@ only as a dev-dependency, where tests use it as a second reader of what objserde
 [docs.rs](https://docs.rs/aomesh) carries the crate tour and the per-module notes, including
 what the bvh measured *not* to be faster, so nobody has to try it twice.
 
-Rust 1.85 or newer. Dual-licensed MIT OR Apache-2.0. Source and issue tracker:
+Rust 1.88 or newer. Dual-licensed MIT OR Apache-2.0. Source and issue tracker:
 [github.com/uvar-apps/aomesh](https://github.com/uvar-apps/aomesh).

@@ -69,10 +69,18 @@ only member carrying meshview.
 > **From 0.3.** Two output changes make 0.4.0. The baked OBJ keeps the input's header
 > comments, `o` objects and `g` groups (objserde 0.3 models them), so a molecular surface
 > split into one group per component comes back split, provenance header included. And the
-> MTL's map line is now plain `map_Kd <ramp>.png`: `-imfchan l` is defined for scalar maps,
-> not `map_Kd`, and three.js's `MTLLoader` read it as part of the file name and loaded no
-> texture. The ramp is greyscale, so every channel reads the same grey. No visibility value
+> MTL's map line is now plain `map_Kd <ramp>.png`. `-imfchan` picks the channel of a
+> *scalar* map, so on a greyscale ramp it could not change anything a reader samples — and
+> readers that implement only part of the option set take `-imfchan l` for the start of the
+> file name and load no texture (three.js's `MTLLoader` handles `-bm`, `-s`, `-o`).
+> The plain spelling is the one both kinds of reader gets right. No visibility value
 > changed.
+>
+> **From 0.4.** `s` smoothing statements now survive the bake as well (objserde 0.4
+> models them), so a mesh that asked for hard edges — or welded ones — still asks
+> afterwards; a mesh that never said `s` gains none, so existing output is unchanged.
+> `rust-version` is also corrected to 1.88, the oldest toolchain that actually builds
+> this, with `resolver = "3"` so dependency selection keeps to it.
 
 A run leaves four files next to the mesh it read, and never modifies that mesh:
 
@@ -142,7 +150,7 @@ the MTL declares one material whose `map_Kd` is the ramp, with no map options: t
 is greyscale, so any channel a renderer samples is the same grey, and an option such as
 `-imfchan` (meant for scalar maps) is one some readers take for part of the file name.
 Geometry, trailing vertex fields, `vn` bindings, the header comments before the first
-record and the `o`/`g` lines pass through untouched; the input's own materials are
+record and the `o`/`g`/`s` lines pass through untouched; the input's own materials are
 replaced, since this file's material exists to carry occlusion.
 
 Writing goes through objserde's structural mode (`Obj`'s `Display`) rather than its
@@ -240,7 +248,7 @@ pass for a bake that is quietly wrong.
 ## Verification
 
 ```sh
-cargo test --workspace     # 31 tests, 10 doctests; also compiles the 3 examples
+cargo test --workspace     # 32 tests, 10 doctests; also compiles the 3 examples
 cargo clippy --workspace --all-targets
 cargo fmt --all --check
 ```
