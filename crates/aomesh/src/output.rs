@@ -1,17 +1,21 @@
 //! Assembling and writing the bake's output triple, in objserde only.
 //!
 //! The generated OBJ carries the same geometry it read — positions, trailing
-//! vertex fields, normals, the header comments, objects and groups — with the AO
-//! answer attached as texture coordinates: one `vt` per vertex, and every face
-//! corner of a vertex pointing at that vertex's own entry. The `.mtl` declares
-//! one material whose `map_Kd` is the `256 × 1` ramp, so a renderer resolving the
-//! vertex's coordinate reads back the grey that vertex was judged.
+//! vertex fields, normals, the header comments, objects, groups and smoothing
+//! statements — with the AO answer attached as texture coordinates: one `vt` per
+//! vertex, and every face corner of a vertex pointing at that vertex's own entry.
+//! The `.mtl` declares one material whose `map_Kd` is the `256 × 1` ramp, so a
+//! renderer resolving the vertex's coordinate reads back the grey that vertex was
+//! judged.
 //!
-//! The map line carries no options. `-imfchan` is defined for scalar maps (bump,
-//! decal, displacement), not for `map_Kd`, and a reader that does not know it —
-//! three.js's `MTLLoader`, for one — takes `-imfchan l` for part of the file
-//! name and loads no texture at all. The ramp is a greyscale PNG, so every
-//! channel a renderer reads from it is the same grey anyway.
+//! The map line carries no options. `-imfchan` names the channel to read a
+//! *scalar* map from — its documented uses are bump, decal and displacement — and
+//! the ramp is a greyscale PNG, so on this texture every channel already holds the
+//! same grey and the option could not change what a caller sees. Nor is it
+//! harmless: readers that implement only part of the option set take `-imfchan l`
+//! for the beginning of the file name and load no texture at all (three.js's
+//! `MTLLoader` handles `-bm`, `-s` and `-o`). The plain spelling is the one both
+//! kinds of reader gets right.
 //!
 //! Writing is objserde's Mode A (`Obj`'s `Display`), deliberately: the crate's
 //! Mode B (`write_mesh`) normalizes faces to `f a//a b//b c//c` and cannot carry
@@ -153,10 +157,12 @@ pub fn ao_obj(input: &Obj, coordinates: &[f64], names: &OutputNames) -> Obj {
                 })
                 .collect(),
             material: Some(0),
-            // Objects and groups pass through: a mesh split into components
-            // keeps its split.
+            // Objects, groups and smoothing pass through: a mesh split into
+            // components keeps its split, and a mesh that asked for hard edges
+            // — or welded ones — still asks for them.
             object: face.object,
             group: face.group,
+            smooth_group: face.smooth_group,
         })
         .collect();
 
@@ -176,6 +182,7 @@ pub fn ao_obj(input: &Obj, coordinates: &[f64], names: &OutputNames) -> Obj {
         materials: vec![ao_material(names)],
         objects: input.objects.clone(),
         groups: input.groups.clone(),
+        smooth_groups: input.smooth_groups.clone(),
     }
 }
 

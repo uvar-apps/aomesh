@@ -67,9 +67,69 @@ fn an_explicit_destination_renames_the_whole_set() {
         mtl.contains("\nmap_Kd other.png\n"),
         "the library must point at its own texture by name, with no options:\n{mtl}"
     );
-    // `-imfchan` is for scalar maps; on `map_Kd` a reader that does not know it
-    // (three.js's MTLLoader) reads it as part of the file name.
+    // The ramp is greyscale, so `-imfchan l` could not change what a reader samples —
+    // and readers that skip options they do not implement take it for the file name.
     assert!(!mtl.contains("-imfchan"), "{mtl}");
+}
+
+/// Hard and welded edges are stated in an OBJ as `s` lines, and a bake that drops
+/// them quietly changes how the mesh shades downstream. objserde 0.4 models
+/// smoothing; this is the bake keeping it.
+#[test]
+fn smoothing_groups_survive_the_bake() {
+    let directory = tempfile::tempdir().expect("temp dir");
+    let source = "\
+v 0 0 0
+v 8 0 0
+v 8 8 0
+v 0 8 0
+v 2 2 0
+v 6 2 0
+v 6 6 0
+v 2 6 0
+s 1
+f 1 2 3 4
+s off
+f 5 6 7 8
+";
+    let input = common::write_mesh(directory.path(), "smoothed.obj", source);
+    let report = bake(&input, None, &options(16)).expect("bake");
+
+    let written = std::fs::read_to_string(&report.object).expect("baked obj reads");
+    let baked = objserde::parse(&written).expect("baked obj parses");
+    let from_source = objserde::parse(source).expect("source parses");
+
+    assert!(
+        written.contains("\ns 1\n") && written.contains("\ns off\n"),
+        "both statements survive: {written}"
+    );
+    assert_eq!(baked.smooth_groups, ["1", "off"], "{written}");
+    assert_eq!(
+        baked
+            .faces
+            .iter()
+            .map(|face| face.smooth_group)
+            .collect::<Vec<_>>(),
+        from_source
+            .faces
+            .iter()
+            .map(|face| face.smooth_group)
+            .collect::<Vec<_>>(),
+        "every face keeps the smoothing value it was written under"
+    );
+
+    // The other half of the promise, and the one that protects every existing
+    // bake: a mesh that never mentioned smoothing grows no `s` statement, so its
+    // output stays what the earlier versions wrote.
+    let (cube, _) = common::cube_with_kinds(2);
+    let quiet = common::write_mesh(directory.path(), "plain.obj", &cube);
+    let report = bake(&quiet, None, &options(16)).expect("bake");
+    let written = std::fs::read_to_string(&report.object).expect("baked obj reads");
+    let stray: Vec<&str> = written
+        .lines()
+        .filter(|line| line.starts_with('s'))
+        .collect();
+    assert!(stray.is_empty(), "a smoothing-free mesh gained {stray:?}");
 }
 
 /// A molecular surface arrives with a provenance header and one group per

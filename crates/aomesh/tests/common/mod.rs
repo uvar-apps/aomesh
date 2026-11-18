@@ -236,7 +236,7 @@ fn vertex_count(text: &str) -> usize {
 #[must_use]
 pub fn disk_over_floor(r: f64, h: f64, sides: usize, floor_half: usize) -> (String, usize) {
     assert!(
-        floor_half % 2 == 0,
+        floor_half.is_multiple_of(2),
         "the floor needs a vertex at the origin"
     );
     let mut text = String::from("# floor grid with a disk overhead\n");
